@@ -226,7 +226,7 @@ pub struct Amount {
 	pub currency: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum MonetaryAccountBankStatus {
 	#[serde(rename = "ACTIVE")]
 	Active,
