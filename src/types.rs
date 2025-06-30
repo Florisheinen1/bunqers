@@ -94,6 +94,19 @@ pub struct CreateDeviceServer {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct DeviceServerWrapper {
+	#[serde(rename = "DeviceServer")]
+	pub device_server: DeviceServer
+}
+impl Deref for DeviceServerWrapper {
+	type Target = DeviceServer;
+
+	fn deref(&self) -> &Self::Target {
+		&self.device_server
+	}
+}
+
+#[derive(Debug, Deserialize)]
 pub struct DeviceServer {
 	pub id: u32,
 	#[serde(deserialize_with = "deserialize_date")]
@@ -112,9 +125,13 @@ pub struct DeviceServerSmall {
 
 #[derive(Debug, Deserialize)]
 pub enum DeviceServerStatus {
+	#[serde(rename = "ACTIVE")]
 	Active,
+	#[serde(rename = "BLOCKED")]
 	Blocked,
+	#[serde(rename = "NEEDS_CONFIRMATION")]
 	NeedsConfirmation,
+	#[serde(rename = "OBSOLETE")]
 	Obsolete
 }
 

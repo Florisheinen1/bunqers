@@ -107,7 +107,7 @@ impl Client<NoSessionContext> {
 		self.messenger.send(Method::POST, "device-server", Some(body)).await
 	}
 
-	async fn get_registered_devices(&self) -> Response<Multiple<DeviceServer>> {
+	async fn get_registered_devices(&self) -> Response<Multiple<DeviceServerWrapper>> {
 		self.messenger.send(Method::GET, "device-server", None).await
 	}
 
