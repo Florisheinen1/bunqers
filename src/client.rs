@@ -3,23 +3,21 @@ use reqwest::Method;
 
 use crate::{messenger::{Messenger, Response}, types::*};
 
-
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NoSessionContext {
-	private_key: PKey<Private>,
-	install_token: Option<String>,
-	session_token: Option<String>,
-	owner_id: Option<u32>,
+	pub private_key: PKey<Private>,
+	pub install_token: Option<String>,
+	pub session_token: Option<String>,
+	pub owner_id: Option<u32>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SessionContext {
 	private_key: PKey<Private>,
-	session_token: String,
-	owner_id: u32,
+	pub install_token: String,
+	pub session_token: String,
+	pub owner_id: u32,
 }
-
 
 pub struct Client<T> {
 	bunq_api_key: String,
@@ -29,18 +27,29 @@ pub struct Client<T> {
 }
 
 impl Client<NoSessionContext> {
-	pub fn new(bunq_api_key: &str, private_key: PKey<Private>, session_token: Option<String>) -> Self {
+	pub fn new(bunq_api_key: String, private_key: PKey<Private>, session_token: Option<String>) -> Self {
 		let messenger = Messenger::new(format!("https://api.bunq.com/v1/"), format!("bunqers-sdk-test"), private_key.clone());
 		
 		Client {
 			messenger,
-			bunq_api_key: bunq_api_key.into(),
+			bunq_api_key: bunq_api_key,
 			state: NoSessionContext {
 				private_key,
 				install_token: None,
 				session_token,
 				owner_id: None
 			},
+		}
+	}
+
+	pub fn from_context(bunq_api_key: String, context: NoSessionContext) -> Self {
+		let messenger = Messenger::new(
+			format!("https://api.bunq.com/v1/"), 
+			format!("bunqers-sdk-test"), context.private_key.clone());
+		Self {
+			bunq_api_key,
+			messenger,
+			state: context,
 		}
 	}
 
@@ -92,14 +101,13 @@ impl Client<NoSessionContext> {
 			description: format!("Test laptop 2"),
 			permitted_ips: Vec::new(),
 		};
-		dbg!("Sending create device register...");
+
 		let body = serde_json::to_string(&body).expect("Failed to serialize");
 
 		self.messenger.send(Method::POST, "device-server", Some(body)).await
 	}
 
 	async fn get_registered_devices(&self) -> Response<Multiple<DeviceServer>> {
-		dbg!("Sending get registered devices...");
 		self.messenger.send(Method::GET, "device-server", None).await
 	}
 
@@ -171,6 +179,7 @@ impl Client<SessionContext> {
 			state: SessionContext {
 				private_key: no_session.state.private_key,
 				session_token: no_session.state.session_token.expect("No session token present"),
+				install_token: no_session.state.install_token.expect("No install token present"),
     			owner_id: 0, // We update this value immediately after creating
 			},
 		};
@@ -188,6 +197,11 @@ impl Client<SessionContext> {
 		};
 
 		client
+	}
+
+	/// Returns the session context of this Client
+	pub fn get_session_context(&self) -> SessionContext {
+		self.state.clone()
 	}
 
 	// =========== Endpoints =========== //
