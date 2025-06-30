@@ -1,9 +1,9 @@
-use std::ops::Deref;
+use std::{fmt::Display, ops::Deref};
 
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
-use crate::deserialization::deserialize_date;
+use crate::deserialization::{deserialize_date, deserialize_string_to_f32};
 
 ////// General Api Response types ///////
 
@@ -221,7 +221,8 @@ pub struct MonetaryAccountBank {
 
 #[derive(Debug, Deserialize)]
 pub struct Amount {
-	pub value: String,
+	#[serde(deserialize_with = "deserialize_string_to_f32")]
+	pub value: f32,
 	pub currency: String,
 }
 

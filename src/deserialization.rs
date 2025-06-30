@@ -212,6 +212,7 @@ impl<'de> Deserialize<'de> for Session {
 }
 
 
+
 // impl<'de> Deserialize<'de> for BunqMeTabWrapper {
 // 	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
 // 	where
@@ -228,7 +229,7 @@ impl<'de> Deserialize<'de> for Session {
 // }
 
 
-// Parse the string into a NaiveDateTime
+/// Parse the string into a NaiveDateTime
 pub fn deserialize_date<'de, D>(deserializer: D) -> Result<NaiveDateTime, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -236,4 +237,13 @@ where
 	let s = String::deserialize(deserializer)?;
 	NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S%.f")
 		.map_err(|e| D::Error::custom(format!("Incorrect datetime {s}: {}", e.to_string())))
+}
+
+/// Parse the string into a f32
+pub fn deserialize_string_to_f32<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+	let s = String::deserialize(deserializer)?;
+	s.parse::<f32>().map_err(serde::de::Error::custom)
 }
