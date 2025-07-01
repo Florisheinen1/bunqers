@@ -1,7 +1,7 @@
 use std::any::type_name;
 
 use chrono::NaiveDateTime;
-use serde::{Deserialize, de::Error};
+use serde::{de::Error, Deserialize, Serializer};
 
 use crate::types::*;
 
@@ -211,24 +211,6 @@ impl<'de> Deserialize<'de> for Session {
 	}
 }
 
-
-
-// impl<'de> Deserialize<'de> for BunqMeTabWrapper {
-// 	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-// 	where
-// 		D: serde::Deserializer<'de> {
-
-// 		let value = serde_json::Value::deserialize(deserializer).expect("Failed to deserialize BunqMeTabWrapper");
-
-// 		let tab = value.get("BunqMeTab").ok_or_else(|| D::Error::custom(format!("BunqMeTab not present in wrapper")))?;
-
-// 		let tab: BunqMeTab = BunqMeTab::deserialize(tab).map_err(|e| D::Error::custom(format!("BunqMeTab: {}", e.to_string())))?;
-
-// 		Ok(Self(tab))
-// 	}
-// }
-
-
 /// Parse the string into a NaiveDateTime
 pub fn deserialize_date<'de, D>(deserializer: D) -> Result<NaiveDateTime, D::Error>
 where
@@ -246,4 +228,13 @@ where
 {
 	let s = String::deserialize(deserializer)?;
 	s.parse::<f32>().map_err(serde::de::Error::custom)
+}
+
+/// Serializes a f32 into a string with two decimals for Bunq
+pub fn serialize_f32_to_string<S>(x: &f32, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let formatted = format!("{:.2}", x);
+    serializer.serialize_str(&formatted)
 }

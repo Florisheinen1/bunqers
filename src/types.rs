@@ -1,9 +1,9 @@
-use std::{fmt::Display, ops::Deref};
+use std::ops::Deref;
 
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
-use crate::deserialization::{deserialize_date, deserialize_string_to_f32};
+use crate::deserialization::{deserialize_date, deserialize_string_to_f32, serialize_f32_to_string};
 
 ////// General Api Response types ///////
 
@@ -219,9 +219,9 @@ pub struct MonetaryAccountBank {
 	// pub alias: Vec<BunqPointer>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Amount {
-	#[serde(deserialize_with = "deserialize_string_to_f32")]
+	#[serde(deserialize_with = "deserialize_string_to_f32", serialize_with = "serialize_f32_to_string")]
 	pub value: f32,
 	pub currency: String,
 }
@@ -243,13 +243,15 @@ pub enum MonetaryAccountBankStatus {
 ////////////////// BunqMeTab ////////////////
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct BunqMeTabWrapper(pub BunqMeTab);
-
+pub struct BunqMeTabWrapper {
+	#[serde(rename = "BunqMeTab")]
+	bunqme_tab: BunqMeTab
+}
 impl Deref for BunqMeTabWrapper {
 	type Target = BunqMeTab;
 
 	fn deref(&self) -> &Self::Target {
-		&self.0
+		&self.bunqme_tab
 	}
 }
 
@@ -280,4 +282,20 @@ pub enum BunqMeTabStatus {
 	Paid,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct CreateBunqMeTabWrapper {
+	pub(crate) bunqme_tab_entry: CreateBunqMeTab,
 
+}
+#[derive(Debug, Serialize, Clone)]
+pub struct CreateBunqMeTab {
+	pub amount_inquired: Amount,
+    pub description: String,
+    pub redirect_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateBunqMeTabResponseWrapper {
+	#[serde(rename = "Id")]
+	pub id: BunqId
+}

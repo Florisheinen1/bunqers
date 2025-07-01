@@ -223,11 +223,33 @@ impl Client<SessionContext> {
 	}
 
 	// /// Fetches a list of payment requests
-	// pub async fn get_payment_requests(&self, monetary_account_id: u32) -> Result<Vec<BunqMeTabWrapper>, Error> {
+	// pub async fn get_payment_requests(&self, monetary_account_id: u32) -> Response<Multiple<BunqMeTabWrapper>> {
 	// 	let endpoint = format!("user/{}/monetary-account/{monetary_account_id}/bunqme-tab", self.state.owner_id);
-	// 	let response = self.do_request(Method::GET, &endpoint, None).await?;
-	// 	Ok(response.response)
+	// 	self.messenger.send(Method::GET, &endpoint, None).await
 	// }
+
+	/// Fetches the payment request with given id
+	pub async fn get_payment_request(&self, monetary_account_id: u32, payment_request_id: u32) -> Response<Single<BunqMeTabWrapper>> {
+		let endpoint = format!("user/{}/monetary-account/{monetary_account_id}/bunqme-tab/{payment_request_id}", self.state.owner_id);
+		self.messenger.send(Method::GET, &endpoint, None).await
+	}
+
+	/// Creates a new payment request
+	pub async fn create_payment_request(&self, monetary_account_id: u32, amount: f32, description: String, redirect_url: String) -> Response<Single<CreateBunqMeTabResponseWrapper>> {
+		let endpoint = format!("user/{}/monetary-account/{monetary_account_id}/bunqme-tab", self.state.owner_id);
+		
+		let body = CreateBunqMeTabWrapper{
+			bunqme_tab_entry: CreateBunqMeTab {
+				amount_inquired: Amount { value: amount, currency: format!("EUR") },
+				description,
+				redirect_url,
+			}
+		};
+
+		let body = serde_json::to_string(&body).expect("Failed to serialize body of create payment request");
+		
+		self.messenger.send(Method::POST, &endpoint, Some(body)).await
+	}
 
 	// /// Returns the bunq data of given payment request
 	// pub async fn get_payment_request(&self, monetary_account_id: u32, payment_request_id: u32) -> Result<BunqMeTabWrapper, Error> {
