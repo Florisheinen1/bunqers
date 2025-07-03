@@ -123,7 +123,7 @@ pub struct DeviceServerSmall {
 	pub id: u32
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
 pub enum DeviceServerStatus {
 	#[serde(rename = "ACTIVE")]
 	Active,

@@ -3,71 +3,87 @@ use reqwest::Method;
 
 use crate::{messenger::{Messenger, Response}, types::*};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct NoSessionContext {
-	pub private_key: PKey<Private>,
-	pub install_token: Option<String>,
+	pub installation_token: Option<String>,
+	pub registered_device_id: Option<u32>,
 	pub session_token: Option<String>,
-	pub owner_id: Option<u32>,
+	pub owner_id: Option<u32>, // TODO: Hide this
 }
 
 #[derive(Debug, Clone)]
 pub struct SessionContext {
-	private_key: PKey<Private>,
-	pub install_token: String,
+	pub installation_token: String,
+	pub registered_device_id: u32,
 	pub session_token: String,
-	pub owner_id: u32,
+	owner_id: u32,
 }
 
 pub struct Client<T> {
-	bunq_api_key: String,
+	private_key: PKey<Private>,
+	api_key: String,
 	messenger: Messenger,
 
-	state: T,
+	context: T,
 }
 
 impl Client<NoSessionContext> {
-	pub fn new(bunq_api_key: String, private_key: PKey<Private>, session_token: Option<String>) -> Self {
-		let messenger = Messenger::new(format!("https://api.bunq.com/v1/"), format!("bunqers-sdk-test"), private_key.clone());
-		
-		Client {
-			messenger,
-			bunq_api_key: bunq_api_key,
-			state: NoSessionContext {
-				private_key,
-				install_token: None,
-				session_token,
-				owner_id: None
-			},
-		}
+	/// Creates a new Client with no session related state
+	pub fn new(api_key: String, private_key: PKey<Private>) -> Self {
+		Self::from_context(api_key, private_key, NoSessionContext::default())
 	}
 
-	pub fn from_context(bunq_api_key: String, context: NoSessionContext) -> Self {
+	/// Creates a no-session Client from given context
+	pub fn from_context(api_key: String, private_key: PKey<Private>, context: NoSessionContext) -> Self {
 		let messenger = Messenger::new(
 			format!("https://api.bunq.com/v1/"), 
-			format!("bunqers-sdk-test"), context.private_key.clone());
+			format!("bunqers-sdk-test"),
+			private_key.clone());
+
 		Self {
-			bunq_api_key,
+			private_key,
+			api_key,
 			messenger,
-			state: context,
+			context,
 		}
 	}
 
 	/// Converts this client to one with a session
 	pub async fn get_session(mut self) -> Client<SessionContext> {
-		self.ensure_installation_token().await;
-		self.ensure_device_registered().await;
-		self.ensure_session().await;
+		let installation_token = self.get_or_create_installation_token().await;
 
-		let session_client = Client::from_no_session(self).await;
-		session_client
+		self.messenger.set_auth_header(Some(installation_token.clone()));
+
+		let registered_device_id = self.get_or_create_registered_device().await;
+
+		let session_token = self.get_or_create_session_token().await;
+
+		self.messenger.set_auth_header(Some(session_token.clone()));
+
+		let owner_id = self.get_or_fetch_owner_id().await;
+
+		let client = Client {
+			private_key: self.private_key,
+			api_key: self.api_key,
+			messenger: self.messenger,
+			context: SessionContext {
+				installation_token,
+				registered_device_id,
+				session_token,
+				owner_id,
+			},
+		};
+
+		return client;
 	}
 
+	// ===================== Installation token ===================== //
+
 	/// Sends a request providing Bunq with our public key to get an installation token
-	async fn send_create_installation_token(&self) -> Response<Installation> {
+	async fn create_installation_token(&self) -> Response<Installation> {
 		let body = CreateInstallation {
 			client_public_key: String::from_utf8_lossy(
-				&self.state.private_key.public_key_to_pem()
+				&self.private_key.public_key_to_pem()
 				.expect("Failed to serialize public key")
 			).to_string(),
 		};
@@ -76,132 +92,180 @@ impl Client<NoSessionContext> {
 		self.messenger.send(Method::POST, "installation", Some(body)).await
 	}
 
-	/// Provides Bunq with our public key. Step 1 in creating a session
-	async fn ensure_installation_token(&mut self) {
-		if self.state.install_token.is_some() {
-			println!("Installation token already present.");
-			// TODO: Check if we can verify it's correctness?
-		} else {
-			print!("No installation token found. Creating new one...");
+	/// Provides Bunq with our public key and returns the Installation token
+	/// Step 1 in creating a session
+	async fn get_or_create_installation_token(&self) -> String {
+		match &self.context.installation_token {
+			Some(token) => {
+				println!("Reusing installation token: {token}");
+				token.clone()
+			},
+			None => {
+				// Create a new token
+				print!("Creating new installation token... ");
+				let response = self.create_installation_token()
+					.await
+					.body.into_result().expect("Failed to create Installation token");
 
-			let response = self.send_create_installation_token().await;
-			
-			let body = response.body.into_result().expect("Failed to get body from installation request");
+				let new_installation_token = response.token.token;
 
-			println!("Created: {:?}", body.token.token);
-			self.state.install_token = Some(body.token.token.clone());
+				// TODO: Verify and use Bunq's public key
+
+				println!("Created: {new_installation_token}");
+				new_installation_token
+			},
 		}
-		self.messenger.set_auth_header(self.state.install_token.clone());
 	}
+
+	// ===================== Device registration ===================== //
 	
 	/// Sends request to bind current IP address (device) to API key
-	async fn send_create_device_server(&self) -> Response<Single<DeviceServerSmall>> {
+	/// If this fails, you most likely need a new API key
+	async fn register_new_device(&self, device_description: String) -> Response<Single<DeviceServerSmall>> {
 		let body = CreateDeviceServer {
-			bunq_api_key: self.bunq_api_key.clone(),
-			description: format!("Test laptop 2"),
+			bunq_api_key: self.api_key.clone(),
+			description: device_description,
 			permitted_ips: Vec::new(),
 		};
 
-		let body = serde_json::to_string(&body).expect("Failed to serialize");
+		let body = serde_json::to_string(&body).expect("Failed to serialize register device body");
 
 		self.messenger.send(Method::POST, "device-server", Some(body)).await
 	}
 
+	/// Returns a list of all registered devices linked to this installation key
 	async fn get_registered_devices(&self) -> Response<Multiple<DeviceServerWrapper>> {
 		self.messenger.send(Method::GET, "device-server", None).await
 	}
 
-	/// Makes sure this device with IP and API key are registered. Step 2 of getting a session
-	async fn ensure_device_registered(&self) {
-		let registered_devices = self.get_registered_devices().await;
+	/// Registers this device (IP address) to the installation key, retuning the device ID
+	/// Step 2 in creating a session
+	async fn get_or_create_registered_device(&self) -> u32 {
+		let current_device_id = self.context.registered_device_id;
 		
-		let body = registered_devices.body.into_result().expect("Failed to get body of get devices request");
+		// If already registered, verify it!
+		if let Some(current_device_id) = current_device_id {
+			print!("Verifying known registered device ID... ");
+			let response = self.get_registered_devices().await;
 
-		if body.data.is_empty() {
-			// We need to register this device
-			println!("No registered device found. Registering this new device.");
+			let registered_devices = match response.body.into_result() {
+				Ok(devices) => devices,
+				Err(error) => panic!(
+					"Failed to get list of registered devices. Code: {}, Error: {:?}",
+					response.code, error
+				)
+			};
 
-			let _created_device = self.send_create_device_server().await;
-			
-		} else {
-			println!("Registered device found.");
+			let matching_device = registered_devices.data.iter().find(|device| {
+					device.id == current_device_id &&
+					device.status == DeviceServerStatus::Active
+				}
+			);
+
+			if let Some(matching_device) = matching_device {
+				println!("Verified: {}", matching_device.id);
+				return matching_device.id
+			}
+
+			println!("Invalid ID: {current_device_id}\nIn list:\n{:?}", registered_devices);
 		}
+
+		// Otherwise, we'll need to register this new device!
+		print!("Registering new device... ");
+		let response = self.register_new_device(format!("Couch Laptop 2")).await;
+
+		let registered_device = match response.body.into_result() {
+			Ok(device) => device,
+			Err(error) => panic!(
+				"Failed to register new device. Code: {}, Error: {:?}\n\n=> You probably need a new API key!",
+				response.code, error
+			),
+		};
+
+		println!("Registered: {}", registered_device.id);
+		return registered_device.id;
 	}
 
+	// ===================== Session token ===================== //
+
 	/// Sends a request to Bunq to create a new session
-	async fn send_create_new_session(&self) -> Response<Session> {
+	async fn create_new_session(&self) -> Response<Session> {
 		let body = CreateSession {
-			bunq_api_key: self.bunq_api_key.clone(),
+			bunq_api_key: self.api_key.clone(),
 		};
 		
-		let body = serde_json::to_string(&body).expect("Failed to serialize");
+		let body = serde_json::to_string(&body).expect("Failed to serialize create session body");
 	
 		self.messenger.send(Method::POST, "session-server", Some(body)).await
 	}
 
-	/// Checks if a current session exists. Ohterwise, creates a new one. Step 3 in creating a new session
-	/// Returns the user id of the owner of this session
-	async fn ensure_session(&mut self) {
-		print!("Ensuring session... ");
-		if let Some(session_token) = &self.state.session_token {
-			println!("Already present. Will need to fetch owner data to verify.");
+	/// Reuses or creates a new session token
+	/// Step 3 in creating a session
+	async fn get_or_create_session_token(&self) -> String {
 
-			self.messenger.set_auth_header(Some(session_token.clone()));
-		} else {
-			// Fix a new one
-			print!("Creating new one...");
-			
-			// TODO: If error, we should make new API key
-			let response = self.send_create_new_session().await;
-
-			let body = response.body.into_result().expect("Failed to get body of create session request");
-
-			let session_token = &body.token.token;
-
-			let owner_id = body.user_person.id;
-			let owner_name = &body.user_person.display_name;
-
-			self.state.session_token = Some(session_token.to_string());
-			self.state.owner_id = Some(owner_id);
-
-			self.messenger.set_auth_header(Some(session_token.clone()));
-			
-			println!("Created session for {owner_name}: {session_token}");
+		// If we already have a session token, return it
+		if let Some(session_token) = &self.context.session_token {
+			println!("Reusing session token: {session_token}");
+			return session_token.clone();
 		}
+
+		// Now, we need to create a new session token!
+		print!("Creating new session token... ");
+		let response = self.create_new_session().await;
+
+		let session = match response.body.into_result() {
+			Ok(session) => session,
+			Err(error) => panic!(
+				"Failed to create new session. Code: {}, Error: {:?}",
+				response.code, error
+			),
+			// TODO: Handle error nicely
+		};
+
+		// TODO: Also store ID of owner
+
+		println!("Created: {}", session.token.token);
+		return session.token.token;
+	}
+
+	// ===================== Owner ID ===================== //
+
+	/// Fetches the owner ID of this Bunq account
+	async fn fetch_owner_id(&self) -> Response<Single<User>> {
+		self.messenger.send(Method::GET, "user", None).await
+	}
+
+	/// Gets known or fetches unknown ID of the owner of this Bunq account
+	/// Used to verify if session is successful
+	async fn get_or_fetch_owner_id(&self) -> u32 {
+
+		if let Some(owner_id) = self.context.owner_id {
+			println!("Fetched owner already during session creation: {owner_id}");
+			return owner_id;
+		}
+
+		// Fetch owner id from Bunq's servers
+		print!("Fetching owner id... ");
+		let response  = self.fetch_owner_id().await;
+		
+		let user = match response.body.into_result() {
+			Ok(user) => user,
+			Err(error) => panic!(
+				"Failed to fetch owner of account. Code: {}, Error: {:?}",
+				response.code, error
+			),
+			// TODO: Handle error better
+		};
+
+		println!("Fetched: {}, a.k.a. {}", user.user_person.id, user.user_person.display_name);
+		return user.user_person.id;
 	}
 }
 
 impl Client<SessionContext> {
-	async fn from_no_session(no_session: Client<NoSessionContext>) -> Self {
-		let mut client = Client::<SessionContext>{
-			messenger: no_session.messenger,
-			bunq_api_key: no_session.bunq_api_key,
-			state: SessionContext {
-				private_key: no_session.state.private_key,
-				session_token: no_session.state.session_token.expect("No session token present"),
-				install_token: no_session.state.install_token.expect("No install token present"),
-    			owner_id: 0, // We update this value immediately after creating
-			},
-		};
-
-		// Update the owner id!
-
- 		client.state.owner_id = match no_session.state.owner_id {
-			Some(id) => id,
-			None => {
-				let person = &client.get_user().await.body.into_result().expect("Failed to get person").user_person;
-				println!("Fetched person from existing session: {}", person.display_name);
-				// Gotta fetch it first!
-				person.id
-			},
-		};
-
-		client
-	}
-
 	/// Returns the session context of this Client
 	pub fn get_session_context(&self) -> SessionContext {
-		self.state.clone()
+		self.context.clone()
 	}
 
 	// =========== Endpoints =========== //
@@ -212,13 +276,13 @@ impl Client<SessionContext> {
 
 	/// Fetches a list of monetary accounts
 	pub async fn get_monetary_accounts(&self) -> Response<Multiple<MonetaryAccountBankWrapper>> {
-		let endpoint = format!("user/{}/monetary-account-bank", self.state.owner_id);
+		let endpoint = format!("user/{}/monetary-account-bank", self.context.owner_id);
 		self.messenger.send(Method::GET, &endpoint, None).await
 	}
 
 	/// Fetches a list of monetary accounts
 	pub async fn get_monetary_account(&self, bank_account_id: u32) -> Response<Single<MonetaryAccountBankWrapper>> {
-		let endpoint = format!("user/{}/monetary-account-bank/{}", self.state.owner_id, bank_account_id);
+		let endpoint = format!("user/{}/monetary-account-bank/{}", self.context.owner_id, bank_account_id);
 		self.messenger.send(Method::GET, &endpoint, None).await
 	}
 
@@ -230,13 +294,13 @@ impl Client<SessionContext> {
 
 	/// Fetches the payment request with given id
 	pub async fn get_payment_request(&self, monetary_account_id: u32, payment_request_id: u32) -> Response<Single<BunqMeTabWrapper>> {
-		let endpoint = format!("user/{}/monetary-account/{monetary_account_id}/bunqme-tab/{payment_request_id}", self.state.owner_id);
+		let endpoint = format!("user/{}/monetary-account/{monetary_account_id}/bunqme-tab/{payment_request_id}", self.context.owner_id);
 		self.messenger.send(Method::GET, &endpoint, None).await
 	}
 
 	/// Creates a new payment request
 	pub async fn create_payment_request(&self, monetary_account_id: u32, amount: f32, description: String, redirect_url: String) -> Response<Single<CreateBunqMeTabResponseWrapper>> {
-		let endpoint = format!("user/{}/monetary-account/{monetary_account_id}/bunqme-tab", self.state.owner_id);
+		let endpoint = format!("user/{}/monetary-account/{monetary_account_id}/bunqme-tab", self.context.owner_id);
 		
 		let body = CreateBunqMeTabWrapper{
 			bunqme_tab_entry: CreateBunqMeTab {
