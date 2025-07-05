@@ -267,7 +267,7 @@ pub struct BunqMeTab {
 	pub monetary_account_id: u32,
 	pub status: BunqMeTabStatus,
 	pub bunqme_tab_share_url: String,
-
+	pub result_inquiries: Vec<BunqMeTabInquiry>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -298,4 +298,33 @@ pub struct CreateBunqMeTab {
 pub struct CreateBunqMeTabResponseWrapper {
 	#[serde(rename = "Id")]
 	pub id: BunqId
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct BunqMeTabInquiry {
+	pub id: u32,
+	pub payment: PaymentWrapper
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PaymentWrapper {
+	#[serde(rename = "Payment")]
+	pub payment: Payment
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Payment {
+	pub id: u32,
+	#[serde(deserialize_with = "deserialize_date")]
+	pub created: NaiveDateTime,
+	#[serde(deserialize_with = "deserialize_date")]
+	pub updated: NaiveDateTime,
+	pub counterparty_alias: Alias
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Alias {
+	pub iban: String,
+	pub display_name: String,
+	pub country: String,
 }

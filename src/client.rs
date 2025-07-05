@@ -1,3 +1,5 @@
+use std::ops::Mul;
+
 use openssl::pkey::{PKey, Private};
 use reqwest::Method;
 
@@ -332,6 +334,11 @@ impl Client<SessionContext> {
 	// 	let response = self.do_request(Method::POST, &endpoint, Some(body)).await?;
 	// 	let created_payment_request = response.response.into_iter().next().expect("No payment request data available in response");
 	// 	Ok(created_payment_request)
+	// }
+
+	// pub async fn get_notification_filters(&self) -> Response<Multiple<NotificationFilter>> {
+	// 	let endpoint = format!("user/{}/notification-filter-url", self.context.owner_id);
+	// 	self.messenger.send(Method::GET, &endpoint, None).await
 	// }
 }
 
