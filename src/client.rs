@@ -1,5 +1,3 @@
-use std::ops::Mul;
-
 use openssl::pkey::{PKey, Private};
 use reqwest::Method;
 
@@ -271,18 +269,18 @@ impl Client<SessionContext> {
 	}
 
 	// =========== Endpoints =========== //
-	/// Fetches the user data of this session
+	/// Fetches the user data of this session (GET)
 	pub async fn get_user(&self) -> Response<Single<User>> {
 		self.messenger.send(Method::GET, "user", None).await
 	}
 
-	/// Fetches a list of monetary accounts
+	/// Fetches a list of monetary accounts (GET)
 	pub async fn get_monetary_accounts(&self) -> Response<Multiple<MonetaryAccountBankWrapper>> {
 		let endpoint = format!("user/{}/monetary-account-bank", self.context.owner_id);
 		self.messenger.send(Method::GET, &endpoint, None).await
 	}
 
-	/// Fetches a list of monetary accounts
+	/// Fetches a list of monetary accounts (GET)
 	pub async fn get_monetary_account(&self, bank_account_id: u32) -> Response<Single<MonetaryAccountBankWrapper>> {
 		let endpoint = format!("user/{}/monetary-account-bank/{}", self.context.owner_id, bank_account_id);
 		self.messenger.send(Method::GET, &endpoint, None).await
@@ -294,13 +292,13 @@ impl Client<SessionContext> {
 	// 	self.messenger.send(Method::GET, &endpoint, None).await
 	// }
 
-	/// Fetches the payment request with given id
+	/// Fetches the payment request with given id (GET)
 	pub async fn get_payment_request(&self, monetary_account_id: u32, payment_request_id: u32) -> Response<Single<BunqMeTabWrapper>> {
 		let endpoint = format!("user/{}/monetary-account/{monetary_account_id}/bunqme-tab/{payment_request_id}", self.context.owner_id);
 		self.messenger.send(Method::GET, &endpoint, None).await
 	}
 
-	/// Creates a new payment request
+	/// Creates a new payment request (POST)
 	pub async fn create_payment_request(&self, monetary_account_id: u32, amount: f32, description: String, redirect_url: String) -> Response<Single<CreateBunqMeTabResponseWrapper>> {
 		let endpoint = format!("user/{}/monetary-account/{monetary_account_id}/bunqme-tab", self.context.owner_id);
 		
