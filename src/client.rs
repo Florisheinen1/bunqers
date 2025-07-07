@@ -1,4 +1,4 @@
-use openssl::pkey::{PKey, Private};
+use openssl::{pkey::{PKey, Private}, rsa::Rsa};
 use reqwest::Method;
 
 use crate::{messenger::{Messenger, Response}, types::*};
@@ -6,6 +6,7 @@ use crate::{messenger::{Messenger, Response}, types::*};
 #[derive(Debug, Clone, Default)]
 pub struct NoSessionContext {
 	pub installation_token: Option<String>,
+	pub bunq_public_key: Option<String>,
 	pub registered_device_id: Option<u32>,
 	pub session_token: Option<String>,
 	pub owner_id: Option<u32>, // TODO: Hide this
@@ -14,6 +15,7 @@ pub struct NoSessionContext {
 #[derive(Debug, Clone)]
 pub struct SessionContext {
 	pub installation_token: String,
+	pub bunq_public_key: String,
 	pub registered_device_id: u32,
 	pub session_token: String,
 	owner_id: u32,
@@ -25,6 +27,11 @@ pub struct Client<T> {
 	messenger: Messenger,
 
 	context: T,
+}
+
+struct InstallationResult {
+	token: String,
+	public_key: String,
 }
 
 impl Client<NoSessionContext> {
@@ -50,9 +57,18 @@ impl Client<NoSessionContext> {
 
 	/// Converts this client to one with a session
 	pub async fn get_session(mut self) -> Client<SessionContext> {
-		let installation_token = self.get_or_create_installation_token().await;
+		let installation = self.get_or_create_installation_token().await;
 
-		self.messenger.set_auth_header(Some(installation_token.clone()));
+		// Update messenger with authentication details
+		self.messenger.set_auth_header(Some(installation.token.clone()));
+
+		// Parse Bunq's public key
+		let key = Rsa::public_key_from_pem(installation.public_key.as_bytes())
+			.expect("Failed to create public key from string");
+		let key = PKey::from_rsa(key)
+			.expect("Failed to create general public key from RSA");
+
+		self.messenger.set_bunq_public_key(key);
 
 		let registered_device_id = self.get_or_create_registered_device().await;
 
@@ -67,7 +83,8 @@ impl Client<NoSessionContext> {
 			api_key: self.api_key,
 			messenger: self.messenger,
 			context: SessionContext {
-				installation_token,
+				installation_token: installation.token,
+				bunq_public_key: installation.public_key,
 				registered_device_id,
 				session_token,
 				owner_id,
@@ -89,32 +106,36 @@ impl Client<NoSessionContext> {
 		};
 		let body = serde_json::to_string(&body).expect("Failed to serialize installation body");
 
-		self.messenger.send(Method::POST, "installation", Some(body)).await
+		self.messenger.send_unverified(Method::POST, "installation", Some(body)).await
 	}
 
 	/// Provides Bunq with our public key and returns the Installation token
 	/// Step 1 in creating a session
-	async fn get_or_create_installation_token(&self) -> String {
-		match &self.context.installation_token {
-			Some(token) => {
+	async fn get_or_create_installation_token(&self) -> InstallationResult {
+		// Check if we already have installed
+		if let Some(token) = &self.context.installation_token {
+			if let Some(key) = &self.context.bunq_public_key {
 				println!("Reusing installation token: {token}");
-				token.clone()
-			},
-			None => {
-				// Create a new token
-				print!("Creating new installation token... ");
-				let response = self.create_installation_token()
-					.await
-					.body.into_result().expect("Failed to create Installation token");
-
-				let new_installation_token = response.token.token;
-
-				// TODO: Verify and use Bunq's public key
-
-				println!("Created: {new_installation_token}");
-				new_installation_token
-			},
+				return InstallationResult {
+					token: token.to_string(),
+					public_key: key.to_string(),
+				}
+			}
+			println!("Installation token present, but not Bunq's public key for verification!");
 		}
+
+		// Create a new token
+		print!("Creating new installation token... ");
+		let response = self.create_installation_token()
+			.await
+			.body.into_result().expect("Failed to create Installation token");
+
+		println!("Created: {}", response.token.token);
+
+		return InstallationResult {
+			token: response.token.token,
+			public_key: response.bunq_public_key,
+		};
 	}
 
 	// ===================== Device registration ===================== //
