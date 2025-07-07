@@ -1,7 +1,7 @@
 use std::any::type_name;
 
 use chrono::NaiveDateTime;
-use serde::{de::Error, Deserialize, Serializer};
+use serde::{de::Error, Deserialize};
 
 use crate::types::*;
 
@@ -219,22 +219,4 @@ where
 	let s = String::deserialize(deserializer)?;
 	NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S%.f")
 		.map_err(|e| D::Error::custom(format!("Incorrect datetime {s}: {}", e.to_string())))
-}
-
-/// Parse the string into a f32
-pub fn deserialize_string_to_f32<'de, D>(deserializer: D) -> Result<f32, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-	let s = String::deserialize(deserializer)?;
-	s.parse::<f32>().map_err(serde::de::Error::custom)
-}
-
-/// Serializes a f32 into a string with two decimals for Bunq
-pub fn serialize_f32_to_string<S>(x: &f32, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    let formatted = format!("{:.2}", x);
-    serializer.serialize_str(&formatted)
 }

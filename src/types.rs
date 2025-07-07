@@ -1,9 +1,10 @@
 use std::ops::Deref;
 
 use chrono::NaiveDateTime;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::deserialization::{deserialize_date, deserialize_string_to_f32, serialize_f32_to_string};
+use crate::deserialization::deserialize_date;
 
 ////// General Api Response types ///////
 
@@ -221,8 +222,7 @@ pub struct MonetaryAccountBank {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Amount {
-	#[serde(deserialize_with = "deserialize_string_to_f32", serialize_with = "serialize_f32_to_string")]
-	pub value: f32,
+	pub value: Decimal,
 	pub currency: String,
 }
 

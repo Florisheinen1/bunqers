@@ -1,5 +1,6 @@
 use openssl::{pkey::{PKey, Private}, rsa::Rsa};
 use reqwest::Method;
+use rust_decimal::Decimal;
 
 use crate::{messenger::{Messenger, Response}, types::*};
 
@@ -320,7 +321,7 @@ impl Client<SessionContext> {
 	}
 
 	/// Creates a new payment request (POST)
-	pub async fn create_payment_request(&self, monetary_account_id: u32, amount: f32, description: String, redirect_url: String) -> Response<Single<CreateBunqMeTabResponseWrapper>> {
+	pub async fn create_payment_request(&self, monetary_account_id: u32, amount: Decimal, description: String, redirect_url: String) -> Response<Single<CreateBunqMeTabResponseWrapper>> {
 		let endpoint = format!("user/{}/monetary-account/{monetary_account_id}/bunqme-tab", self.context.owner_id);
 		
 		let body = CreateBunqMeTabWrapper{
