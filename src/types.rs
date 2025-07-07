@@ -284,15 +284,29 @@ pub enum BunqMeTabStatus {
 
 #[derive(Debug, Serialize, Clone)]
 pub struct CreateBunqMeTabWrapper {
-	pub(crate) bunqme_tab_entry: CreateBunqMeTab,
-
+	pub bunqme_tab_entry: CreateBunqMeTab,
 }
+
 #[derive(Debug, Serialize, Clone)]
 pub struct CreateBunqMeTab {
 	pub amount_inquired: Amount,
-    pub description: String,
-    pub redirect_url: String,
+	pub description: String,
+	pub redirect_url: String,
 }
+
+#[derive(Debug, Serialize)]
+pub struct AlterBunqMeTabRequest {
+	// pub bunqme_tab_entry: Option<AlterBunqMeTab>,
+	pub status: Option<BunqMeTabStatus>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AlterBunqMeTab {
+	pub amount_inquired: Option<Amount>,
+	pub description: Option<String>,
+	pub redirect_url: Option<String>,
+}
+
 
 #[derive(Debug, Deserialize)]
 pub struct CreateBunqMeTabResponseWrapper {

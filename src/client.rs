@@ -337,6 +337,21 @@ impl Client<SessionContext> {
 		self.messenger.send(Method::POST, &endpoint, Some(body)).await
 	}
 
+	/// Closes the given payment request
+	pub async fn close_payment_request(&self, monetary_account_id: u32, payment_request_id: u32) -> Response<Single<CreateBunqMeTabResponseWrapper>> {
+		let endpoint = format!("user/{}/monetary-account/{monetary_account_id}/bunqme-tab/{payment_request_id}", self.context.owner_id);
+		let body = AlterBunqMeTabRequest {
+			// bunqme_tab_entry: Some(AlterBunqMeTab {
+			// 	amount_inquired: None,
+			// 	description: None,
+			// 	redirect_url: None,
+			// }),
+			status: Some(BunqMeTabStatus::Cancelled),
+		};
+		let body = serde_json::to_string(&body).expect("Failed to serialize AlterBunqMeTab request body");
+		self.messenger.send(Method::PUT, &endpoint, Some(body)).await
+	}
+
 	// /// Returns the bunq data of given payment request
 	// pub async fn get_payment_request(&self, monetary_account_id: u32, payment_request_id: u32) -> Result<BunqMeTabWrapper, Error> {
 	// 	let endpoint = format!("user/{}/monetary-account/{monetary_account_id}/bunqme-tab/{payment_request_id}", self.state.owner_id);
