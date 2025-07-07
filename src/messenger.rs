@@ -1,4 +1,4 @@
-use std::{fs::File, io::Write};
+use std::{fs::File, io::Write, thread::sleep, time::Duration};
 
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
@@ -122,7 +122,20 @@ impl Messenger {
 	where T: DeserializeOwned {
 		let bunq_public_key = self.bunq_public_key.clone().expect("No public key set to verify response");
 
-		let unverified_response = self.send_request(method, endpoint, body).await;
+		let unverified_response = loop {
+			let response = self.send_request(method.clone(), endpoint, body.clone()).await;
+
+			// If we encountered rate limit (status code 429):
+			if response.status().as_u16() == 429 {
+				println!("RATE LIMIT ERROR! Method: {method}, endpoint: {endpoint}, body: {body:?}");
+				println!("RATE LIMIT RESPONSE: {}", response.text().await.expect("Failed to get response of body"));
+				println!("Sleeping for a bit...");
+				sleep(Duration::from_secs(3));
+				println!("Resending");
+			} else {
+				break response
+			}
+		};
 
 		let body_signature = unverified_response.headers()
 			.get("X-Bunq-Server-Signature").expect("No Server signature available. Cannot validate response")
