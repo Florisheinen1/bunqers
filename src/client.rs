@@ -308,12 +308,6 @@ impl Client<SessionContext> {
 		self.messenger.send(Method::GET, &endpoint, None).await
 	}
 
-	// /// Fetches a list of payment requests
-	// pub async fn get_payment_requests(&self, monetary_account_id: u32) -> Response<Multiple<BunqMeTabWrapper>> {
-	// 	let endpoint = format!("user/{}/monetary-account/{monetary_account_id}/bunqme-tab", self.state.owner_id);
-	// 	self.messenger.send(Method::GET, &endpoint, None).await
-	// }
-
 	/// Fetches the payment request with given id (GET)
 	pub async fn get_payment_request(&self, monetary_account_id: u32, payment_request_id: u32) -> Response<Single<BunqMeTabWrapper>> {
 		let endpoint = format!("user/{}/monetary-account/{monetary_account_id}/bunqme-tab/{payment_request_id}", self.context.owner_id);
@@ -341,39 +335,10 @@ impl Client<SessionContext> {
 	pub async fn close_payment_request(&self, monetary_account_id: u32, payment_request_id: u32) -> Response<Single<CreateBunqMeTabResponseWrapper>> {
 		let endpoint = format!("user/{}/monetary-account/{monetary_account_id}/bunqme-tab/{payment_request_id}", self.context.owner_id);
 		let body = AlterBunqMeTabRequest {
-			// bunqme_tab_entry: Some(AlterBunqMeTab {
-			// 	amount_inquired: None,
-			// 	description: None,
-			// 	redirect_url: None,
-			// }),
 			status: Some(BunqMeTabStatus::Cancelled),
 		};
 		let body = serde_json::to_string(&body).expect("Failed to serialize AlterBunqMeTab request body");
 		self.messenger.send(Method::PUT, &endpoint, Some(body)).await
 	}
-
-	// /// Returns the bunq data of given payment request
-	// pub async fn get_payment_request(&self, monetary_account_id: u32, payment_request_id: u32) -> Result<BunqMeTabWrapper, Error> {
-	// 	let endpoint = format!("user/{}/monetary-account/{monetary_account_id}/bunqme-tab/{payment_request_id}", self.state.owner_id);
-	// 	let response = self.do_request(Method::GET, &endpoint, None).await?;
-	// 	let payment_request = response.response.into_iter().next().expect("No payment request data in response");
-	// 	Ok(payment_request)
-	// }
-
-	// /// Creates a payment request
-	// pub async fn create_payment_request(&self, monetary_account_id: u32, request: &CreateBunqMeTab) -> Result<BunqMeTabCreate, Error> {
-	// 	let body = serde_json::to_string(request).expect("Failed to serialize payment request creation");
-
-	// 	let endpoint = format!("user/{}/monetary-account/{monetary_account_id}/bunqme-tab", self.state.owner_id);
-
-	// 	let response = self.do_request(Method::POST, &endpoint, Some(body)).await?;
-	// 	let created_payment_request = response.response.into_iter().next().expect("No payment request data available in response");
-	// 	Ok(created_payment_request)
-	// }
-
-	// pub async fn get_notification_filters(&self) -> Response<Multiple<NotificationFilter>> {
-	// 	let endpoint = format!("user/{}/notification-filter-url", self.context.owner_id);
-	// 	self.messenger.send(Method::GET, &endpoint, None).await
-	// }
 }
 
