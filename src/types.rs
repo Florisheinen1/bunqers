@@ -11,7 +11,7 @@ use crate::deserialization::deserialize_date;
 #[derive(Debug, Serialize, Clone)]
 pub enum ApiResponseBody<T> {
 	Ok(T),
-	Err(Vec<ApiErrorDescription>)
+	Err(Vec<ApiErrorDescription>),
 }
 
 impl<T> ApiResponseBody<T> {
@@ -21,6 +21,7 @@ impl<T> ApiResponseBody<T> {
 			ApiResponseBody::Err(api_error_descriptions) => Err(api_error_descriptions),
 		}
 	}
+	// TODO: Make into_result into Response rather than ApiResponseBody
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -41,7 +42,7 @@ pub struct Pagination {
 #[derive(Debug, Clone)]
 pub struct Multiple<T> {
 	pub data: Vec<T>,
-	pub pagination: Pagination
+	pub pagination: Pagination,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -59,7 +60,7 @@ impl<T> Deref for Single<T> {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CreateInstallation {
-	pub client_public_key: String
+	pub client_public_key: String,
 }
 
 #[derive(Debug)]
@@ -81,7 +82,7 @@ pub struct InstallationToken {
 
 #[derive(Debug, Deserialize)]
 pub struct BunqId {
-	pub id: u32
+	pub id: u32,
 }
 
 ///////////// Device Server ////////////
@@ -97,7 +98,7 @@ pub struct CreateDeviceServer {
 #[derive(Debug, Deserialize)]
 pub struct DeviceServerWrapper {
 	#[serde(rename = "DeviceServer")]
-	pub device_server: DeviceServer
+	pub device_server: DeviceServer,
 }
 impl Deref for DeviceServerWrapper {
 	type Target = DeviceServer;
@@ -116,12 +117,12 @@ pub struct DeviceServer {
 	pub updated: NaiveDateTime,
 	pub description: String,
 	pub ip: String,
-	pub status: DeviceServerStatus
+	pub status: DeviceServerStatus,
 }
 
 #[derive(Debug)]
 pub struct DeviceServerSmall {
-	pub id: u32
+	pub id: u32,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -133,7 +134,7 @@ pub enum DeviceServerStatus {
 	#[serde(rename = "NEEDS_CONFIRMATION")]
 	NeedsConfirmation,
 	#[serde(rename = "OBSOLETE")]
-	Obsolete
+	Obsolete,
 }
 
 ///////////// Session ////////////
@@ -141,7 +142,7 @@ pub enum DeviceServerStatus {
 #[derive(Debug, Serialize)]
 pub struct CreateSession {
 	#[serde(rename = "secret")]
-	pub bunq_api_key: String
+	pub bunq_api_key: String,
 }
 
 #[derive(Debug)]
@@ -187,20 +188,19 @@ pub struct UserPerson {
 	// pub notification_filters: Vec<NotificationFilter>,
 }
 
-
 ////////////////// UserListing ////////////////
 
 #[derive(Debug, Deserialize)]
 pub struct User {
 	#[serde(rename = "UserPerson")]
-	pub user_person: UserPerson
+	pub user_person: UserPerson,
 }
 
 ////////////////// Monetary Account ////////////////
 #[derive(Debug, Deserialize)]
 pub struct MonetaryAccountBankWrapper {
 	#[serde(rename = "MonetaryAccountBank")]
-	pub monetary_account_bank: MonetaryAccountBank
+	pub monetary_account_bank: MonetaryAccountBank,
 }
 impl Deref for MonetaryAccountBankWrapper {
 	type Target = MonetaryAccountBank;
@@ -245,7 +245,7 @@ pub enum MonetaryAccountBankStatus {
 #[derive(Debug, Deserialize, Clone)]
 pub struct BunqMeTabWrapper {
 	#[serde(rename = "BunqMeTab")]
-	bunqme_tab: BunqMeTab
+	bunqme_tab: BunqMeTab,
 }
 impl Deref for BunqMeTabWrapper {
 	type Target = BunqMeTab;
@@ -270,7 +270,7 @@ pub struct BunqMeTab {
 	pub result_inquiries: Vec<BunqMeTabInquiry>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub enum BunqMeTabStatus {
 	#[serde(rename = "WAITING_FOR_PAYMENT")]
 	WaitingForPayment,
@@ -307,23 +307,22 @@ pub struct AlterBunqMeTab {
 	pub redirect_url: Option<String>,
 }
 
-
 #[derive(Debug, Deserialize)]
 pub struct CreateBunqMeTabResponseWrapper {
 	#[serde(rename = "Id")]
-	pub id: BunqId
+	pub id: BunqId,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct BunqMeTabInquiry {
 	pub id: u32,
-	pub payment: PaymentWrapper
+	pub payment: PaymentWrapper,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct PaymentWrapper {
 	#[serde(rename = "Payment")]
-	pub payment: Payment
+	pub payment: Payment,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -333,7 +332,7 @@ pub struct Payment {
 	pub created: NaiveDateTime,
 	#[serde(deserialize_with = "deserialize_date")]
 	pub updated: NaiveDateTime,
-	pub counterparty_alias: Alias
+	pub counterparty_alias: Alias,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

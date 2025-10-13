@@ -1,296 +1,214 @@
-use openssl::{pkey::{PKey, Private}, rsa::Rsa};
+use openssl::{
+	error::ErrorStack,
+	pkey::{PKey, Private, Public},
+	rsa::Rsa,
+};
 use reqwest::Method;
 use rust_decimal::Decimal;
 
-use crate::{messenger::{Messenger, Response}, types::*};
+use crate::{
+	messenger::{Messenger, Response, Verified},
+	types::Session as BunqSession,
+	types::*,
+};
 
-#[derive(Debug, Clone, Default)]
-pub struct NoSessionContext {
-	pub installation_token: Option<String>,
-	pub bunq_public_key: Option<String>,
-	pub registered_device_id: Option<u32>,
-	pub session_token: Option<String>,
-	pub owner_id: Option<u32>, // TODO: Hide this
+pub enum DeviceInstallationError {
+	KeyCreationError(ErrorStack),
+	KeySerialization(ErrorStack),
+	BunqRequestError,
+	BunqResponseError(Vec<ApiErrorDescription>),
+	KeyDeserializationError(ErrorStack),
 }
 
-#[derive(Debug, Clone)]
-pub struct SessionContext {
+pub enum SessionCreationError {
+	BunqRequestError,
+	BunqResponseError(Vec<ApiErrorDescription>),
+}
+
+pub struct BunqDeviceInstallation {
+	pub private_key: PKey<Private>,
 	pub installation_token: String,
-	pub bunq_public_key: String,
-	pub registered_device_id: u32,
-	pub session_token: String,
+	pub bunq_public_key: PKey<Public>,
+}
+
+/// Contains device installation specific data
+/// Required to create a session with Bunq
+impl BunqDeviceInstallation {
+	/// Installs the current device
+	/// Sends newly created private key to Bunq and retrieves Bunq's public key and installation token
+	pub async fn install_device() -> Result<Self, DeviceInstallationError> {
+		let new_key = Rsa::generate(2048)
+			.map_err(|error| DeviceInstallationError::KeyCreationError(error))?;
+		let private_key = PKey::from_rsa(new_key)
+			.map_err(|error| DeviceInstallationError::KeyCreationError(error))?;
+
+		Self::install_device_with_key(private_key).await
+	}
+
+	/// Installs the current device
+	/// Sends private key to Bunq and retrieves Bunq's public key and installation token
+	pub async fn install_device_with_key(
+		private_key: PKey<Private>,
+	) -> Result<Self, DeviceInstallationError> {
+		let messenger = Messenger::new(
+			format!("https://api.bunq.com/v1/"),
+			format!("bunqers-sdk-test"),
+			private_key.clone(),
+		);
+
+		let body = CreateInstallation {
+			client_public_key: String::from_utf8_lossy(
+				&private_key
+					.public_key_to_pem()
+					.map_err(|error| DeviceInstallationError::KeySerialization(error))?,
+			)
+			.to_string(),
+		};
+
+		let body =
+			serde_json::to_string(&body).map_err(|_| DeviceInstallationError::BunqRequestError)?;
+
+		let response: Response<Installation> = messenger
+			.send_unverified(Method::POST, "installation", Some(body))
+			.await;
+
+		let result = response
+			.body
+			.into_result()
+			.map_err(|error| DeviceInstallationError::BunqResponseError(error))?;
+
+		// Parse Bunq's public key
+		let bunq_public_key = Rsa::public_key_from_pem(result.bunq_public_key.as_bytes())
+			.map_err(|error| DeviceInstallationError::KeyDeserializationError(error))?;
+		let bunq_public_key = PKey::from_rsa(bunq_public_key)
+			.map_err(|error| DeviceInstallationError::KeyDeserializationError(error))?;
+
+		Ok(Self {
+			private_key,
+			installation_token: result.token.token,
+			bunq_public_key: bunq_public_key,
+		})
+	}
+}
+
+pub struct NoSession;
+pub struct Session {
 	owner_id: u32,
 }
 
 pub struct Client<T> {
-	private_key: PKey<Private>,
-	api_key: String,
-	messenger: Messenger,
-
+	messenger: Messenger<Verified>,
+	bunq_api_key: String,
+	installation_token: String,
 	context: T,
 }
 
-struct InstallationResult {
-	token: String,
-	public_key: String,
-}
-
-impl Client<NoSessionContext> {
-	/// Creates a new Client with no session related state
-	pub fn new(api_key: String, private_key: PKey<Private>) -> Self {
-		Self::from_context(api_key, private_key, NoSessionContext::default())
-	}
-
-	/// Creates a no-session Client from given context
-	pub fn from_context(api_key: String, private_key: PKey<Private>, context: NoSessionContext) -> Self {
+impl Client<NoSession> {
+	/// Creates a new Client object without active session
+	pub fn new(installation: BunqDeviceInstallation, bunq_api_key: String) -> Self {
 		let messenger = Messenger::new(
-			format!("https://api.bunq.com/v1/"), 
+			format!("https://api.bunq.com/v1/"),
 			format!("bunqers-sdk-test"),
-			private_key.clone());
+			installation.private_key,
+		)
+		.make_verified(installation.bunq_public_key);
 
 		Self {
-			private_key,
-			api_key,
 			messenger,
-			context,
+			bunq_api_key: bunq_api_key,
+			installation_token: installation.installation_token,
+			context: NoSession,
 		}
 	}
 
-	/// Converts this client to one with a session
-	pub async fn get_session(mut self) -> Client<SessionContext> {
-		let installation = self.get_or_create_installation_token().await;
+	/// Takes this instance and returns a client with a session
+	/// Otherwise, device needs to be re-installed
+	pub async fn create_session(mut self) -> Result<Client<Session>, SessionCreationError> {
+		// Set messenger's authentication header to our installation token
 
-		// Update messenger with authentication details
-		self.messenger.set_auth_header(Some(installation.token.clone()));
+		let body = CreateSession {
+			bunq_api_key: self.bunq_api_key.clone(),
+		};
+		let body =
+			serde_json::to_string(&body).map_err(|_| SessionCreationError::BunqRequestError)?;
 
-		// Parse Bunq's public key
-		let key = Rsa::public_key_from_pem(installation.public_key.as_bytes())
-			.expect("Failed to create public key from string");
-		let key = PKey::from_rsa(key)
-			.expect("Failed to create general public key from RSA");
+		let response: Response<BunqSession> = self
+			.messenger
+			.send(Method::POST, "session-server", Some(body))
+			.await;
+		let result = response
+			.body
+			.into_result()
+			.map_err(|error| SessionCreationError::BunqResponseError(error))?;
 
-		self.messenger.set_bunq_public_key(key);
+		let session_token = result.token.token;
+		let owner_id = result.user_person.id;
 
-		let registered_device_id = self.get_or_create_registered_device().await;
+		// Update messenger
+		self.messenger
+			.set_authentication_token(session_token.clone());
 
-		let session_token = self.get_or_create_session_token().await;
-
-		self.messenger.set_auth_header(Some(session_token.clone()));
-
-		let owner_id = self.get_or_fetch_owner_id().await;
-
-		let client = Client {
-			private_key: self.private_key,
-			api_key: self.api_key,
+		return Ok(Client {
 			messenger: self.messenger,
-			context: SessionContext {
-				installation_token: installation.token,
-				bunq_public_key: installation.public_key,
-				registered_device_id,
-				session_token,
-				owner_id,
+			bunq_api_key: self.bunq_api_key,
+			installation_token: self.installation_token,
+			context: Session { owner_id },
+		});
+	}
+
+	pub async fn use_existing_session(
+		mut self,
+		session_token: String,
+	) -> Result<Client<Session>, ()> {
+		// Update messenger's authentication header first
+		self.messenger.set_authentication_token(session_token);
+
+		let test_session: Client<Session> = Client {
+			messenger: self.messenger,
+			bunq_api_key: self.bunq_api_key,
+			installation_token: self.installation_token,
+			context: Session {
+				// Temporary wrong value, will be updated by 'check_session'
+				// TODO: See more elegant solution
+				owner_id: 0,
 			},
 		};
-
-		return client;
-	}
-
-	// ===================== Installation token ===================== //
-
-	/// Sends a request providing Bunq with our public key to get an installation token
-	async fn create_installation_token(&self) -> Response<Installation> {
-		let body = CreateInstallation {
-			client_public_key: String::from_utf8_lossy(
-				&self.private_key.public_key_to_pem()
-				.expect("Failed to serialize public key")
-			).to_string(),
-		};
-		let body = serde_json::to_string(&body).expect("Failed to serialize installation body");
-
-		self.messenger.send_unverified(Method::POST, "installation", Some(body)).await
-	}
-
-	/// Provides Bunq with our public key and returns the Installation token
-	/// Step 1 in creating a session
-	async fn get_or_create_installation_token(&self) -> InstallationResult {
-		// Check if we already have installed
-		if let Some(token) = &self.context.installation_token {
-			if let Some(key) = &self.context.bunq_public_key {
-				println!("Reusing installation token: {token}");
-				return InstallationResult {
-					token: token.to_string(),
-					public_key: key.to_string(),
-				}
-			}
-			println!("Installation token present, but not Bunq's public key for verification!");
-		}
-
-		// Create a new token
-		print!("Creating new installation token... ");
-		let response = self.create_installation_token()
-			.await
-			.body.into_result().expect("Failed to create Installation token");
-
-		println!("Created: {}", response.token.token);
-
-		return InstallationResult {
-			token: response.token.token,
-			public_key: response.bunq_public_key,
-		};
-	}
-
-	// ===================== Device registration ===================== //
-	
-	/// Sends request to bind current IP address (device) to API key
-	/// If this fails, you most likely need a new API key
-	async fn register_new_device(&self, device_description: String) -> Response<Single<DeviceServerSmall>> {
-		let body = CreateDeviceServer {
-			bunq_api_key: self.api_key.clone(),
-			description: device_description,
-			permitted_ips: Vec::new(),
-		};
-
-		let body = serde_json::to_string(&body).expect("Failed to serialize register device body");
-
-		self.messenger.send(Method::POST, "device-server", Some(body)).await
-	}
-
-	/// Returns a list of all registered devices linked to this installation key
-	async fn get_registered_devices(&self) -> Response<Multiple<DeviceServerWrapper>> {
-		self.messenger.send(Method::GET, "device-server", None).await
-	}
-
-	/// Registers this device (IP address) to the installation key, retuning the device ID
-	/// Step 2 in creating a session
-	async fn get_or_create_registered_device(&self) -> u32 {
-		let current_device_id = self.context.registered_device_id;
-		
-		// If already registered, verify it!
-		if let Some(current_device_id) = current_device_id {
-			print!("Verifying known registered device ID... ");
-			let response = self.get_registered_devices().await;
-
-			let registered_devices = match response.body.into_result() {
-				Ok(devices) => devices,
-				Err(error) => panic!(
-					"Failed to get list of registered devices. Code: {}, Error: {:?}",
-					response.code, error
-				)
-			};
-
-			let matching_device = registered_devices.data.iter().find(|device| {
-					device.id == current_device_id &&
-					device.status == DeviceServerStatus::Active
-				}
-			);
-
-			if let Some(matching_device) = matching_device {
-				println!("Verified: {}", matching_device.id);
-				return matching_device.id
-			}
-
-			println!("Invalid ID: {current_device_id}\nIn list:\n{:?}", registered_devices);
-		}
-
-		// Otherwise, we'll need to register this new device!
-		print!("Registering new device... ");
-		let response = self.register_new_device(format!("Couch Laptop 2")).await;
-
-		let registered_device = match response.body.into_result() {
-			Ok(device) => device,
-			Err(error) => panic!(
-				"Failed to register new device. Code: {}, Error: {:?}\n\n=> You probably need a new API key!",
-				response.code, error
-			),
-		};
-
-		println!("Registered: {}", registered_device.id);
-		return registered_device.id;
-	}
-
-	// ===================== Session token ===================== //
-
-	/// Sends a request to Bunq to create a new session
-	async fn create_new_session(&self) -> Response<Session> {
-		let body = CreateSession {
-			bunq_api_key: self.api_key.clone(),
-		};
-		
-		let body = serde_json::to_string(&body).expect("Failed to serialize create session body");
-	
-		self.messenger.send(Method::POST, "session-server", Some(body)).await
-	}
-
-	/// Reuses or creates a new session token
-	/// Step 3 in creating a session
-	async fn get_or_create_session_token(&self) -> String {
-
-		// If we already have a session token, return it
-		if let Some(session_token) = &self.context.session_token {
-			println!("Reusing session token: {session_token}");
-			return session_token.clone();
-		}
-
-		// Now, we need to create a new session token!
-		print!("Creating new session token... ");
-		let response = self.create_new_session().await;
-
-		let session = match response.body.into_result() {
-			Ok(session) => session,
-			Err(error) => panic!(
-				"Failed to create new session. Code: {}, Error: {:?}",
-				response.code, error
-			),
-			// TODO: Handle error nicely
-		};
-
-		// TODO: Also store ID of owner
-
-		println!("Created: {}", session.token.token);
-		return session.token.token;
-	}
-
-	// ===================== Owner ID ===================== //
-
-	/// Fetches the owner ID of this Bunq account
-	async fn fetch_owner_id(&self) -> Response<Single<User>> {
-		self.messenger.send(Method::GET, "user", None).await
-	}
-
-	/// Gets known or fetches unknown ID of the owner of this Bunq account
-	/// Used to verify if session is successful
-	async fn get_or_fetch_owner_id(&self) -> u32 {
-
-		if let Some(owner_id) = self.context.owner_id {
-			println!("Fetched owner already during session creation: {owner_id}");
-			return owner_id;
-		}
-
-		// Fetch owner id from Bunq's servers
-		print!("Fetching owner id... ");
-		let response  = self.fetch_owner_id().await;
-		
-		let user = match response.body.into_result() {
-			Ok(user) => user,
-			Err(error) => panic!(
-				"Failed to fetch owner of account. Code: {}, Error: {:?}",
-				response.code, error
-			),
-			// TODO: Handle error better
-		};
-
-		println!("Fetched: {}, a.k.a. {}", user.user_person.id, user.user_person.display_name);
-		return user.user_person.id;
+		test_session.check_session().await.map_err(|_| ())
 	}
 }
 
-impl Client<SessionContext> {
-	/// Returns the session context of this Client
-	pub fn get_session_context(&self) -> SessionContext {
-		self.context.clone()
+impl Client<Session> {
+	/// Takes this instance and either returns itself or the No Session version
+	async fn check_session(self) -> Result<Self, Client<NoSession>> {
+		let response = self.get_user().await.body.into_result();
+		if response.is_err() {
+			// Session is not available anymore
+			// TODO: Check for actual session expiration error
+			Err(Client {
+				messenger: self.messenger,
+				bunq_api_key: self.bunq_api_key,
+				installation_token: self.installation_token,
+				context: NoSession,
+			})
+		} else {
+			// Otherwise, our session is still in-tact
+			Ok(self)
+		}
 	}
 
-	// =========== Endpoints =========== //
+	/// Checks if current session is still valid by making GET call to '/user'
+	pub async fn ensure_session(self) -> Result<Self, SessionCreationError> {
+		match self.check_session().await {
+			Ok(session) => Ok(session),
+			Err(no_session) => {
+				// Try to create a new session
+				no_session.create_session().await
+			}
+		}
+	}
+
+	//@===@===@===@===@// ENDPOINTS //@===@===@===@===@//
+
 	/// Fetches the user data of this session (GET)
 	pub async fn get_user(&self) -> Response<Single<User>> {
 		self.messenger.send(Method::GET, "user", None).await
@@ -303,42 +221,79 @@ impl Client<SessionContext> {
 	}
 
 	/// Fetches a list of monetary accounts (GET)
-	pub async fn get_monetary_account(&self, bank_account_id: u32) -> Response<Single<MonetaryAccountBankWrapper>> {
-		let endpoint = format!("user/{}/monetary-account-bank/{}", self.context.owner_id, bank_account_id);
+	pub async fn get_monetary_account(
+		&self,
+		bank_account_id: u32,
+	) -> Response<Single<MonetaryAccountBankWrapper>> {
+		let endpoint = format!(
+			"user/{}/monetary-account-bank/{}",
+			self.context.owner_id, bank_account_id
+		);
 		self.messenger.send(Method::GET, &endpoint, None).await
 	}
 
 	/// Fetches the payment request with given id (GET)
-	pub async fn get_payment_request(&self, monetary_account_id: u32, payment_request_id: u32) -> Response<Single<BunqMeTabWrapper>> {
-		let endpoint = format!("user/{}/monetary-account/{monetary_account_id}/bunqme-tab/{payment_request_id}", self.context.owner_id);
+	pub async fn get_payment_request(
+		&self,
+		monetary_account_id: u32,
+		payment_request_id: u32,
+	) -> Response<Single<BunqMeTabWrapper>> {
+		let endpoint = format!(
+			"user/{}/monetary-account/{monetary_account_id}/bunqme-tab/{payment_request_id}",
+			self.context.owner_id
+		);
 		self.messenger.send(Method::GET, &endpoint, None).await
 	}
 
 	/// Creates a new payment request (POST)
-	pub async fn create_payment_request(&self, monetary_account_id: u32, amount: Decimal, description: String, redirect_url: String) -> Response<Single<CreateBunqMeTabResponseWrapper>> {
-		let endpoint = format!("user/{}/monetary-account/{monetary_account_id}/bunqme-tab", self.context.owner_id);
-		
-		let body = CreateBunqMeTabWrapper{
+	pub async fn create_payment_request(
+		&self,
+		monetary_account_id: u32,
+		amount: Decimal,
+		description: String,
+		redirect_url: String,
+	) -> Response<Single<CreateBunqMeTabResponseWrapper>> {
+		let endpoint = format!(
+			"user/{}/monetary-account/{monetary_account_id}/bunqme-tab",
+			self.context.owner_id
+		);
+
+		let body = CreateBunqMeTabWrapper {
 			bunqme_tab_entry: CreateBunqMeTab {
-				amount_inquired: Amount { value: amount, currency: format!("EUR") },
+				amount_inquired: Amount {
+					value: amount,
+					currency: format!("EUR"),
+				},
 				description,
 				redirect_url,
-			}
+			},
 		};
 
-		let body = serde_json::to_string(&body).expect("Failed to serialize body of create payment request");
-		
-		self.messenger.send(Method::POST, &endpoint, Some(body)).await
+		let body = serde_json::to_string(&body)
+			.expect("Failed to serialize body of create payment request");
+
+		self.messenger
+			.send(Method::POST, &endpoint, Some(body))
+			.await
 	}
 
 	/// Closes the given payment request
-	pub async fn close_payment_request(&self, monetary_account_id: u32, payment_request_id: u32) -> Response<Single<CreateBunqMeTabResponseWrapper>> {
-		let endpoint = format!("user/{}/monetary-account/{monetary_account_id}/bunqme-tab/{payment_request_id}", self.context.owner_id);
+	pub async fn close_payment_request(
+		&self,
+		monetary_account_id: u32,
+		payment_request_id: u32,
+	) -> Response<Single<CreateBunqMeTabResponseWrapper>> {
+		let endpoint = format!(
+			"user/{}/monetary-account/{monetary_account_id}/bunqme-tab/{payment_request_id}",
+			self.context.owner_id
+		);
 		let body = AlterBunqMeTabRequest {
 			status: Some(BunqMeTabStatus::Cancelled),
 		};
-		let body = serde_json::to_string(&body).expect("Failed to serialize AlterBunqMeTab request body");
-		self.messenger.send(Method::PUT, &endpoint, Some(body)).await
+		let body =
+			serde_json::to_string(&body).expect("Failed to serialize AlterBunqMeTab request body");
+		self.messenger
+			.send(Method::PUT, &endpoint, Some(body))
+			.await
 	}
 }
-
