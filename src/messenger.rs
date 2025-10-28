@@ -1,4 +1,4 @@
-use std::{fs::File, io::Write, thread::sleep, time::Duration};
+use std::{fs::File, io::Write};
 
 use base64::{Engine, engine::general_purpose};
 use openssl::{
@@ -9,12 +9,37 @@ use openssl::{
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 
-use crate::types::ApiResponseBody;
+use crate::types::{ApiErrorDescription, ApiResponseBody};
 
 #[derive(Debug)]
-pub struct Response<T> {
-	pub body: ApiResponseBody<T>,
-	pub code: StatusCode,
+pub struct ApiErrorResponse {
+	pub status_code: StatusCode,
+	pub reasons: Vec<ApiErrorDescription>,
+}
+pub struct ApiResponse<T> {
+	body: ApiResponseBody<T>,
+	status_code: StatusCode,
+}
+
+impl<T> ApiResponse<T> {
+	pub fn into_result(self) -> Result<T, ApiErrorResponse> {
+		match self.body {
+			ApiResponseBody::Ok(body) => Ok(body),
+			ApiResponseBody::Err(api_error_response) => Err(ApiErrorResponse {
+				status_code: self.status_code,
+				reasons: api_error_response,
+			}),
+		}
+	}
+}
+
+#[derive(Debug)]
+pub enum MessageError {
+	NoResponseBody,
+	BodyParseError,
+	RequestBuildError,
+	RequestSendError,
+	InvalidServerSignature { reason: String },
 }
 
 #[derive(Debug)]
@@ -42,6 +67,7 @@ impl<V> Messenger<V> {
 
 	/// Signs the provided request body with the private key
 	fn sign_body(&self, body: &str) -> String {
+		// TODO: Check if we can keep using the same Signer instead of creating one each time
 		let mut signer = Signer::new(
 			openssl::hash::MessageDigest::sha256(),
 			&self.private_sign_key,
@@ -72,35 +98,33 @@ impl<V> Messenger<V> {
 		method: Method,
 		endpoint: &str,
 		body: Option<String>,
-	) -> Response<T>
+	) -> Result<ApiResponse<T>, MessageError>
 	where
 		T: DeserializeOwned,
 	{
-		let unverified_response = self.send_request(method, endpoint, body).await;
+		let unverified_response = self.send_request(method, endpoint, body).await?;
 
 		let response_code = unverified_response.status();
 		let response_body = unverified_response
 			.bytes()
 			.await
-			.expect("Failed to retrieve body from API response");
+			.map_err(|_| MessageError::NoResponseBody)?;
 
-		let api_response: Result<ApiResponseBody<T>, _> = serde_json::from_slice(&response_body);
-
-		let body = match api_response {
-			Ok(body) => body,
-			Err(parse_error) => {
-				println!("Encountered parsing error: {parse_error}");
+		let response_body: ApiResponseBody<T> =
+			serde_json::from_slice(&response_body).map_err(|error| {
+				println!("Encountered parsing error: {error}");
 				println!("Dumping file to: data_dump.json");
 				Self::dump_json_to_file(&response_body, "data_dump.json")
 					.expect("Failed to dump JSON to file");
-				panic!("Failed");
-			}
+				MessageError::BodyParseError
+			})?;
+
+		let api_response = ApiResponse {
+			body: response_body,
+			status_code: response_code,
 		};
 
-		return Response {
-			body,
-			code: response_code,
-		};
+		Ok(api_response)
 	}
 
 	// Simply sends the request, returns the http response
@@ -109,7 +133,7 @@ impl<V> Messenger<V> {
 		method: Method,
 		endpoint: &str,
 		body: Option<String>,
-	) -> reqwest::Response {
+	) -> Result<reqwest::Response, MessageError> {
 		let url = format!("{}/{}", self.base_url, endpoint);
 		let mut request = match method {
 			Method::POST => self.http_client.post(url),
@@ -134,16 +158,18 @@ impl<V> Messenger<V> {
 			request = request.header("X-Bunq-Client-Authentication", authentication_token)
 		}
 
-		let request = request.build().expect("Failed to build request");
+		let request = request
+			.build()
+			.map_err(|_| MessageError::RequestBuildError)?;
 
 		// And send it
 		let response = self
 			.http_client
 			.execute(request)
 			.await
-			.expect("Failed to send API request");
+			.map_err(|_| MessageError::RequestSendError)?;
 
-		return response;
+		return Ok(response);
 	}
 }
 
@@ -196,69 +222,63 @@ impl Messenger<Verified> {
 	}
 
 	/// Sends the request, and returns the verified parsed expected response
-	pub async fn send<T>(&self, method: Method, endpoint: &str, body: Option<String>) -> Response<T>
+	pub async fn send<T>(
+		&self,
+		method: Method,
+		endpoint: &str,
+		body: Option<String>,
+	) -> Result<ApiResponse<T>, MessageError>
 	where
 		T: DeserializeOwned,
 	{
-		let unverified_response = loop {
-			let response = self
-				.send_request(method.clone(), endpoint, body.clone())
-				.await;
-
-			// If we encountered rate limit (status code 429):
-			if response.status().as_u16() == 429 {
-				println!(
-					"RATE LIMIT ERROR! Method: {method}, endpoint: {endpoint}, body: {body:?}"
-				);
-				println!(
-					"RATE LIMIT RESPONSE: {}",
-					response
-						.text()
-						.await
-						.expect("Failed to get response of body")
-				);
-				println!("Sleeping for a bit...");
-				sleep(Duration::from_secs(3));
-				println!("Resending");
-			} else {
-				break response;
-			}
-		};
+		let unverified_response = self
+			.send_request(method.clone(), endpoint, body.clone())
+			.await?;
 
 		let body_signature = unverified_response
 			.headers()
 			.get("X-Bunq-Server-Signature")
-			.expect("No Server signature available. Cannot validate response")
+			.ok_or_else(|| MessageError::InvalidServerSignature {
+				reason: format!("No key available in Bunq's response"),
+			})?
 			.to_str()
-			.expect("Failed to convert Bunq's response signature to a string")
+			.map_err(|_| MessageError::InvalidServerSignature {
+				reason: format!("Failed to parse Bunq's signature to a string"),
+			})?
 			.to_string();
 
 		let response_code = unverified_response.status();
 		let response_body = unverified_response
 			.bytes()
 			.await
-			.expect("Failed to retrieve body from API response");
+			.map_err(|_| MessageError::NoResponseBody)?;
 
 		if !self.verify_body_signature(&body_signature, &response_body) {
-			panic!("Received invalid signature of response from Bunq");
+			Err(MessageError::InvalidServerSignature {
+				reason: format!("Incorrect signature in Bunq's response"),
+			})?;
 		}
 
-		let api_response: Result<ApiResponseBody<T>, _> = serde_json::from_slice(&response_body);
+		let a = String::from_utf8_lossy(&response_body).to_string();
 
-		let body = match api_response {
-			Ok(body) => body,
-			Err(parse_error) => {
-				println!("Encountered parsing error: {parse_error}");
+		// TODO: Remove this
+		println!("\n\nResponse: \n{a:?}");
+
+		let api_response_body: ApiResponseBody<T> = serde_json::from_slice(&response_body)
+			.map_err(|error| {
+				println!("Encountered parsing error: {error}");
 				println!("Dumping file to: data_dump.json");
 				Self::dump_json_to_file(&response_body, "data_dump.json")
 					.expect("Failed to dump JSON to file");
-				panic!("Failed");
-			}
+
+				MessageError::BodyParseError
+			})?;
+
+		let api_response = ApiResponse {
+			body: api_response_body,
+			status_code: response_code,
 		};
 
-		return Response {
-			body,
-			code: response_code,
-		};
+		Ok(api_response)
 	}
 }

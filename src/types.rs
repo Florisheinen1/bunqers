@@ -15,13 +15,12 @@ pub enum ApiResponseBody<T> {
 }
 
 impl<T> ApiResponseBody<T> {
-	pub fn into_result(self) -> Result<T, Vec<ApiErrorDescription>> {
+	pub fn result(self) -> Result<T, Vec<ApiErrorDescription>> {
 		match self {
-			ApiResponseBody::Ok(v) => Ok(v),
+			ApiResponseBody::Ok(body) => Ok(body),
 			ApiResponseBody::Err(api_error_descriptions) => Err(api_error_descriptions),
 		}
 	}
-	// TODO: Make into_result into Response rather than ApiResponseBody
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -162,7 +161,7 @@ pub struct SessionToken {
 	pub token: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct UserPerson {
 	pub id: u32,
 	// pub status: UserStatus,
@@ -190,7 +189,7 @@ pub struct UserPerson {
 
 ////////////////// UserListing ////////////////
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct User {
 	#[serde(rename = "UserPerson")]
 	pub user_person: UserPerson,
