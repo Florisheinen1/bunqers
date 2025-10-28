@@ -224,13 +224,13 @@ impl ClientBuilder<Installed> {
 		bunq_api_key: String,
 		device_description: String,
 	) -> Result<ClientBuilder<Registered>, BuildError<Installed>> {
-		let mut messenger = Messenger::new(
+		let messenger = Messenger::new(
 			format!("https://api.bunq.com/v1/"),
 			format!("bunqers-sdk-test"),
 			self.context.private_key.clone(),
 		)
-		.make_verified(self.context.bunq_public_key.clone());
-		messenger.set_authentication_token(self.context.installation_token.clone());
+		.make_verified(self.context.bunq_public_key.clone())
+		.set_authentication_token(self.context.installation_token.clone());
 
 		let body = CreateDeviceServer {
 			bunq_api_key: bunq_api_key.clone(),
@@ -281,14 +281,13 @@ impl ClientBuilder<Registered> {
 	pub async fn create_session(
 		self,
 	) -> Result<ClientBuilder<SessionContext>, BuildError<Registered>> {
-		let mut messenger = Messenger::new(
+		let messenger = Messenger::new(
 			format!("https://api.bunq.com/v1/"),
 			format!("bunqers-sdk-test"),
 			self.context.private_key.clone(),
 		)
-		.make_verified(self.context.bunq_public_key.clone());
-		// TODO: Use builder pattern
-		messenger.set_authentication_token(self.context.installation_token.clone());
+		.make_verified(self.context.bunq_public_key.clone())
+		.set_authentication_token(self.context.installation_token.clone());
 
 		let body = CreateSession {
 			bunq_api_key: self.context.bunq_api_key.clone(),
@@ -338,14 +337,13 @@ impl ClientBuilder<UncheckedSession> {
 	pub async fn check_session(
 		self,
 	) -> Result<ClientBuilder<SessionContext>, BuildError<UncheckedSession>> {
-		let mut messenger = Messenger::new(
+		let messenger = Messenger::new(
 			format!("https://api.bunq.com/v1/"),
 			format!("bunqers-sdk-test"),
 			self.context.private_key.clone(),
 		)
-		.make_verified(self.context.bunq_public_key.clone());
-		// TODO: Use builder pattern
-		messenger.set_authentication_token(self.context.session_token.clone());
+		.make_verified(self.context.bunq_public_key.clone())
+		.set_authentication_token(self.context.session_token.clone());
 
 		// TODO: Avoid repetition?
 		let response: ApiResponse<Single<User>> = messenger
@@ -378,14 +376,13 @@ impl ClientBuilder<UncheckedSession> {
 impl ClientBuilder<SessionContext> {
 	pub fn build(self) -> Client {
 		// Set the messenger to use the session token
-		let mut messenger = Messenger::new(
+		let messenger = Messenger::new(
 			format!("https://api.bunq.com/v1/"),
 			format!("bunqers-sdk-test"),
 			self.context.private_key.clone(),
 		)
-		.make_verified(self.context.bunq_public_key.clone());
-		// TODO: Use builder pattern
-		messenger.set_authentication_token(self.context.session_token.clone());
+		.make_verified(self.context.bunq_public_key.clone())
+		.set_authentication_token(self.context.session_token.clone());
 
 		Client {
 			messenger,

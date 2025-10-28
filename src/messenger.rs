@@ -61,13 +61,19 @@ pub struct Messenger<V> {
 }
 
 impl<V> Messenger<V> {
-	pub fn set_authentication_token(&mut self, token: String) {
-		self.authentication_token = Some(token);
+	pub fn set_authentication_token(self, token: String) -> Self {
+		Self {
+			base_url: self.base_url,
+			app_name: self.app_name,
+			http_client: self.http_client,
+			private_sign_key: self.private_sign_key,
+			authentication_token: Some(token),
+			verification_data: self.verification_data,
+		}
 	}
 
 	/// Signs the provided request body with the private key
 	fn sign_body(&self, body: &str) -> String {
-		// TODO: Check if we can keep using the same Signer instead of creating one each time
 		let mut signer = Signer::new(
 			openssl::hash::MessageDigest::sha256(),
 			&self.private_sign_key,
@@ -135,14 +141,11 @@ impl<V> Messenger<V> {
 		body: Option<String>,
 	) -> Result<reqwest::Response, MessageError> {
 		let url = format!("{}/{}", self.base_url, endpoint);
-		let mut request = match method {
-			Method::POST => self.http_client.post(url),
-			Method::GET => self.http_client.get(url),
-			Method::PUT => self.http_client.put(url),
-			_ => todo!("HTTP method not yet implemented"),
-		}
-		.header("User-Agent", self.app_name.clone())
-		.header("Cache-Control", "no-cache");
+		let mut request = self
+			.http_client
+			.request(method, url)
+			.header("User-Agent", self.app_name.clone())
+			.header("Cache-Control", "no-cache");
 
 		// Attach body and corresponding signature
 		if let Some(body) = body {
