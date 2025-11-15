@@ -22,7 +22,6 @@ impl From<SessionContext> for UncheckedSession {
 			bunq_api_key: context.bunq_api_key,
 			installation_token: context.installation_token,
 			bunq_public_key: context.bunq_public_key,
-			private_key: context.private_key,
 		}
 	}
 }
@@ -34,7 +33,6 @@ pub struct UncheckedSession {
 	pub bunq_api_key: String,
 	pub installation_token: String,
 	pub bunq_public_key: PKey<Public>,
-	pub private_key: PKey<Private>,
 }
 
 impl From<UncheckedSession> for Registered {
@@ -44,19 +42,17 @@ impl From<UncheckedSession> for Registered {
 			registered_device_id: context.registered_device_id,
 			bunq_api_key: context.bunq_api_key,
 			bunq_public_key: context.bunq_public_key,
-			private_key: context.private_key,
 		}
 	}
 }
 
 /// Fully ready to create a session
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Registered {
 	pub registered_device_id: u32,
 	pub bunq_api_key: String,
 	pub installation_token: String,
 	pub bunq_public_key: PKey<Public>,
-	pub private_key: PKey<Private>,
 }
 
 impl From<Registered> for Installed {
@@ -64,42 +60,31 @@ impl From<Registered> for Installed {
 		Self {
 			installation_token: context.installation_token,
 			bunq_public_key: context.bunq_public_key,
-			private_key: context.private_key,
 		}
 	}
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Installed {
 	pub installation_token: String,
 	pub bunq_public_key: PKey<Public>,
-	pub private_key: PKey<Private>,
 }
-
-impl From<Installed> for Initialized {
-	fn from(context: Installed) -> Self {
-		Self {
-			private_key: context.private_key,
-		}
-	}
-}
-
-#[derive(Clone)]
-pub struct Initialized {
-	pub private_key: PKey<Private>,
-}
-#[derive(Clone)]
-pub struct Uninitialized;
 
 pub struct ClientBuilder<T> {
+	pub private_key: PKey<Private>,
+	pub api_base_url: String,
+	pub app_name: String,
+	messenger: Messenger,
 	pub context: T,
 }
 
+#[derive(Debug)]
 pub struct BuildError<T> {
 	pub reason: BuildErrorReason,
 	pub context: T,
 }
 
+#[derive(Debug)]
 pub enum BuildErrorReason {
 	KeyCreationError(ErrorStack),
 	KeySerialization(ErrorStack),
@@ -108,58 +93,42 @@ pub enum BuildErrorReason {
 	BunqResponseError, // TODO: Create better response error
 }
 
-impl ClientBuilder<Uninitialized> {
-	/// Creates a new Client builder
-	pub fn new() -> Self {
+impl ClientBuilder<()> {
+	/// Creates a new Client builder with given private key
+	pub fn new_with_key(
+		api_base_url: String,
+		app_name: String,
+		private_key: PKey<Private>,
+	) -> Self {
 		Self {
-			context: Uninitialized,
+			api_base_url: api_base_url.clone(),
+			app_name: app_name.clone(),
+			private_key: private_key.clone(),
+			context: (),
+			messenger: Messenger::new(api_base_url, app_name, private_key, None, None),
 		}
 	}
 
-	/// Adds the given private key to the ClientBuilder
-	/// Used for signing messages to the API
-	pub fn with_private_key(self, private_key: PKey<Private>) -> ClientBuilder<Initialized> {
-		ClientBuilder {
-			context: Initialized { private_key },
-		}
-	}
-
-	/// Creates a new private key for signing messages for the API
-	pub fn create_private_key(
-		self,
-	) -> Result<ClientBuilder<Initialized>, BuildError<Uninitialized>> {
-		let new_key = Rsa::generate(2048).map_err(|error| BuildError {
+	/// Creates a new Client builder with a newly generated private key
+	pub fn new_without_key(api_base_url: String, app_name: String) -> Result<Self, BuildError<()>> {
+		let new_key_pair = Rsa::generate(2048).map_err(|error| BuildError {
 			reason: BuildErrorReason::KeyCreationError(error),
-			context: self.context.clone(),
+			context: (),
 		})?;
-		let private_key = PKey::from_rsa(new_key).map_err(|error| BuildError {
+		let private_key = PKey::from_rsa(new_key_pair).map_err(|error| BuildError {
 			reason: BuildErrorReason::KeyCreationError(error),
-			context: self.context.clone(),
+			context: (),
 		})?;
 
-		Ok(self.with_private_key(private_key))
-	}
-}
-
-impl ClientBuilder<Initialized> {
-	/// Creates an initialized client builder with given context
-	pub fn from_initialization(context: Initialized) -> Self {
-		Self { context }
+		Ok(Self::new_with_key(api_base_url, app_name, private_key))
 	}
 
 	/// Installs this computer
 	/// By sending our public key and fetching the API's public key
-	pub async fn install_device(self) -> Result<ClientBuilder<Installed>, BuildError<Initialized>> {
-		let messenger = Messenger::new(
-			format!("https://api.bunq.com/v1/"),
-			format!("bunqers-sdk-test"),
-			self.context.private_key.clone(),
-		);
-
+	pub async fn install_device(self) -> Result<ClientBuilder<Installed>, BuildError<()>> {
 		let body = CreateInstallation {
 			client_public_key: String::from_utf8_lossy(
 				&self
-					.context
 					.private_key
 					.public_key_to_pem()
 					.map_err(|error| BuildError {
@@ -170,13 +139,14 @@ impl ClientBuilder<Initialized> {
 			.to_string(),
 		};
 
-		let body = serde_json::to_string(&body).map_err(|_| BuildError {
+		let body_text = serde_json::to_string(&body).map_err(|_| BuildError {
 			reason: BuildErrorReason::BunqRequestError,
 			context: self.context.clone(),
 		})?;
 
-		let response: ApiResponse<Installation> = messenger
-			.send_unverified(Method::POST, "installation", Some(body))
+		let response: ApiResponse<Installation> = self
+			.messenger
+			.send_unverified(Method::POST, "installation", Some(body_text))
 			.await
 			.map_err(|_| BuildError {
 				reason: BuildErrorReason::BunqResponseError,
@@ -202,10 +172,13 @@ impl ClientBuilder<Initialized> {
 		})?;
 
 		Ok(ClientBuilder {
+			api_base_url: self.api_base_url,
+			app_name: self.app_name,
+			private_key: self.private_key,
+			messenger: self.messenger,
 			context: Installed {
 				installation_token: result.token.token,
 				bunq_public_key,
-				private_key: self.context.private_key,
 			},
 		})
 	}
@@ -213,8 +186,25 @@ impl ClientBuilder<Initialized> {
 
 impl ClientBuilder<Installed> {
 	/// Creates an installed Client builder from given context
-	pub fn from_installation(context: Installed) -> Self {
-		Self { context }
+	pub fn from_installation(
+		context: Installed,
+		api_base_url: String,
+		app_name: String,
+		private_key: PKey<Private>,
+	) -> Self {
+		Self {
+			api_base_url: api_base_url.clone(),
+			app_name: app_name.clone(),
+			private_key: private_key.clone(),
+			messenger: Messenger::new(
+				api_base_url,
+				app_name,
+				private_key,
+				Some(context.bunq_public_key.clone()),
+				Some(context.installation_token.clone()),
+			),
+			context,
+		}
 	}
 
 	/// Registers this computer with the API
@@ -224,14 +214,6 @@ impl ClientBuilder<Installed> {
 		bunq_api_key: String,
 		device_description: String,
 	) -> Result<ClientBuilder<Registered>, BuildError<Installed>> {
-		let messenger = Messenger::new(
-			format!("https://api.bunq.com/v1/"),
-			format!("bunqers-sdk-test"),
-			self.context.private_key.clone(),
-		)
-		.make_verified(self.context.bunq_public_key.clone())
-		.set_authentication_token(self.context.installation_token.clone());
-
 		let body = CreateDeviceServer {
 			bunq_api_key: bunq_api_key.clone(),
 			description: device_description,
@@ -243,7 +225,8 @@ impl ClientBuilder<Installed> {
 			context: self.context.clone(),
 		})?;
 
-		let response: ApiResponse<Single<DeviceServerSmall>> = messenger
+		let response: ApiResponse<Single<DeviceServerSmall>> = self
+			.messenger
 			.send(Method::POST, "device-server", Some(body))
 			.await
 			.map_err(|_| BuildError {
@@ -260,12 +243,15 @@ impl ClientBuilder<Installed> {
 		let registered_device_id = result.id;
 
 		Ok(ClientBuilder {
+			api_base_url: self.api_base_url,
+			app_name: self.app_name,
+			private_key: self.private_key,
+			messenger: self.messenger,
 			context: Registered {
 				registered_device_id,
 				bunq_api_key,
 				installation_token: self.context.installation_token,
 				bunq_public_key: self.context.bunq_public_key,
-				private_key: self.context.private_key,
 			},
 		})
 	}
@@ -273,22 +259,31 @@ impl ClientBuilder<Installed> {
 
 impl ClientBuilder<Registered> {
 	/// Creates a new Client builder from a registered context
-	pub fn from_registration(context: Registered) -> Self {
-		Self { context }
+	pub fn from_registration(
+		context: Registered,
+		api_base_url: String,
+		app_name: String,
+		private_key: PKey<Private>,
+	) -> Self {
+		Self {
+			api_base_url: api_base_url.clone(),
+			app_name: app_name.clone(),
+			private_key: private_key.clone(),
+			messenger: Messenger::new(
+				api_base_url,
+				app_name,
+				private_key,
+				Some(context.bunq_public_key.clone()),
+				Some(context.installation_token.clone()),
+			),
+			context,
+		}
 	}
 
 	/// Creates a session
 	pub async fn create_session(
 		self,
 	) -> Result<ClientBuilder<SessionContext>, BuildError<Registered>> {
-		let messenger = Messenger::new(
-			format!("https://api.bunq.com/v1/"),
-			format!("bunqers-sdk-test"),
-			self.context.private_key.clone(),
-		)
-		.make_verified(self.context.bunq_public_key.clone())
-		.set_authentication_token(self.context.installation_token.clone());
-
 		let body = CreateSession {
 			bunq_api_key: self.context.bunq_api_key.clone(),
 		};
@@ -297,7 +292,8 @@ impl ClientBuilder<Registered> {
 			context: self.context.clone(),
 		})?;
 
-		let response: ApiResponse<BunqSession> = messenger
+		let response: ApiResponse<BunqSession> = self
+			.messenger
 			.send(Method::POST, "session-server", Some(body))
 			.await
 			.map_err(|_| BuildError {
@@ -313,6 +309,10 @@ impl ClientBuilder<Registered> {
 		let owner_id = result.user_person.id;
 
 		Ok(ClientBuilder {
+			api_base_url: self.api_base_url,
+			app_name: self.app_name,
+			private_key: self.private_key.clone(),
+			messenger: self.messenger,
 			context: SessionContext {
 				owner_id: owner_id,
 				session_token: session_token,
@@ -320,7 +320,6 @@ impl ClientBuilder<Registered> {
 				bunq_api_key: self.context.bunq_api_key,
 				installation_token: self.context.installation_token,
 				bunq_public_key: self.context.bunq_public_key,
-				private_key: self.context.private_key,
 			},
 		})
 	}
@@ -328,8 +327,25 @@ impl ClientBuilder<Registered> {
 
 impl ClientBuilder<UncheckedSession> {
 	/// Creates a Client builder with unchecked session
-	pub fn from_unchecked_session(context: UncheckedSession) -> Self {
-		Self { context }
+	pub fn from_unchecked_session(
+		context: UncheckedSession,
+		api_base_url: String,
+		app_name: String,
+		private_key: PKey<Private>,
+	) -> Self {
+		Self {
+			api_base_url: api_base_url.clone(),
+			app_name: app_name.clone(),
+			private_key: private_key.clone(),
+			messenger: Messenger::new(
+				api_base_url,
+				app_name,
+				private_key,
+				Some(context.bunq_public_key.clone()),
+				Some(context.session_token.clone()),
+			),
+			context,
+		}
 	}
 
 	/// Checks if the session is working
@@ -337,22 +353,19 @@ impl ClientBuilder<UncheckedSession> {
 	pub async fn check_session(
 		self,
 	) -> Result<ClientBuilder<SessionContext>, BuildError<UncheckedSession>> {
-		let messenger = Messenger::new(
-			format!("https://api.bunq.com/v1/"),
-			format!("bunqers-sdk-test"),
-			self.context.private_key.clone(),
-		)
-		.make_verified(self.context.bunq_public_key.clone())
-		.set_authentication_token(self.context.session_token.clone());
-
 		// TODO: Avoid repetition?
-		let response: ApiResponse<Single<User>> = messenger
+		let response: ApiResponse<Single<User>> = self
+			.messenger
 			.send(Method::GET, "user", None)
 			.await
 			.expect("Failed to send request to Bunq");
 
 		match response.into_result() {
 			Ok(user) => Ok(ClientBuilder {
+				api_base_url: self.api_base_url,
+				app_name: self.app_name,
+				private_key: self.private_key.clone(),
+				messenger: self.messenger,
 				context: SessionContext {
 					owner_id: user.user_person.id,
 					session_token: self.context.session_token,
@@ -360,7 +373,6 @@ impl ClientBuilder<UncheckedSession> {
 					bunq_api_key: self.context.bunq_api_key,
 					installation_token: self.context.installation_token,
 					bunq_public_key: self.context.bunq_public_key,
-					private_key: self.context.private_key,
 				},
 			}),
 			Err(error) => {
@@ -375,17 +387,11 @@ impl ClientBuilder<UncheckedSession> {
 
 impl ClientBuilder<SessionContext> {
 	pub fn build(self) -> Client {
-		// Set the messenger to use the session token
-		let messenger = Messenger::new(
-			format!("https://api.bunq.com/v1/"),
-			format!("bunqers-sdk-test"),
-			self.context.private_key.clone(),
-		)
-		.make_verified(self.context.bunq_public_key.clone())
-		.set_authentication_token(self.context.session_token.clone());
-
 		Client {
-			messenger,
+			api_base_url: self.api_base_url,
+			app_name: self.app_name,
+			private_key: self.private_key,
+			messenger: self.messenger,
 			context: self.context,
 		}
 	}

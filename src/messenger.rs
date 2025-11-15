@@ -42,33 +42,31 @@ pub enum MessageError {
 	InvalidServerSignature { reason: String },
 }
 
-#[derive(Debug)]
-pub struct NotVerified;
-#[derive(Debug)]
-pub struct Verified {
-	bunq_public_key: PKey<Public>,
-}
-
-pub struct Messenger<V> {
+pub struct Messenger {
 	base_url: String,
 	app_name: String,
 	http_client: reqwest::Client,
 
 	private_sign_key: PKey<Private>,
+	bunq_public_sign_key: Option<PKey<Public>>,
 	authentication_token: Option<String>,
-
-	verification_data: V,
 }
 
-impl<V> Messenger<V> {
-	pub fn set_authentication_token(self, token: String) -> Self {
+impl Messenger {
+	pub fn new(
+		base_url: String,
+		app_name: String,
+		private_sign_key: PKey<Private>,
+		bunq_public_sign_key: Option<PKey<Public>>,
+		authentication_token: Option<String>,
+	) -> Self {
 		Self {
-			base_url: self.base_url,
-			app_name: self.app_name,
-			http_client: self.http_client,
-			private_sign_key: self.private_sign_key,
-			authentication_token: Some(token),
-			verification_data: self.verification_data,
+			base_url,
+			app_name,
+			http_client: reqwest::Client::new(),
+			private_sign_key,
+			bunq_public_sign_key,
+			authentication_token,
 		}
 	}
 
@@ -98,7 +96,8 @@ impl<V> Messenger<V> {
 		Ok(())
 	}
 
-	/// Sends the request, and returns the parsed expected response without verifying it's signature
+	/// Sends the request, and returns the parsed expected response
+	/// without verifying it's signature
 	pub async fn send_unverified<T>(
 		&self,
 		method: Method,
@@ -108,7 +107,7 @@ impl<V> Messenger<V> {
 	where
 		T: DeserializeOwned,
 	{
-		let unverified_response = self.send_request(method, endpoint, body).await?;
+		let unverified_response = self.send_http_request(method, endpoint, body).await?;
 
 		let response_code = unverified_response.status();
 		let response_body = unverified_response
@@ -133,8 +132,92 @@ impl<V> Messenger<V> {
 		Ok(api_response)
 	}
 
-	// Simply sends the request, returns the http response
-	async fn send_request(
+	/// Verifies the signature of given body
+	fn verify_body_signature(&self, signature: &str, body: &[u8]) -> bool {
+		let decoded_signature = general_purpose::STANDARD
+			.decode(signature)
+			.expect("Failed to decode Bunq's signature");
+
+		let mut verifier = Verifier::new(
+			MessageDigest::sha256(),
+			self.bunq_public_sign_key
+				.as_ref()
+				.expect("Missing Bunq's public key to verify signature"),
+		)
+		.expect("Failed to create signature verifier");
+
+		verifier
+			.update(body)
+			.expect("Failed to pass response body to signature verifier");
+
+		let is_valid = verifier
+			.verify(&decoded_signature)
+			.expect("Failed to check API response's signature");
+
+		return is_valid;
+	}
+
+	/// Builds and sends given request.
+	/// Returns raw HTTP response
+	pub async fn send<T>(
+		&self,
+		method: Method,
+		endpoint: &str,
+		body: Option<String>,
+	) -> Result<ApiResponse<T>, MessageError>
+	where
+		T: DeserializeOwned,
+	{
+		let unverified_response = self
+			.send_http_request(method, endpoint, body.clone())
+			.await?;
+
+		// Verify response signature
+		let body_signature = unverified_response
+			.headers()
+			.get("X-Bunq-Server-Signature")
+			.ok_or_else(|| MessageError::InvalidServerSignature {
+				reason: format!("No key available in Bunq's response"),
+			})?
+			.to_str()
+			.map_err(|_| MessageError::InvalidServerSignature {
+				reason: format!("Failed to parse Bunq's signature to a string"),
+			})?
+			.to_string();
+
+		let response_code = unverified_response.status();
+		let response_body = unverified_response
+			.bytes()
+			.await
+			.map_err(|_| MessageError::NoResponseBody)?;
+
+		if !self.verify_body_signature(&body_signature, &response_body) {
+			Err(MessageError::InvalidServerSignature {
+				reason: format!("Incorrect signature in Bunq's response"),
+			})?;
+		}
+
+		let api_response_body: ApiResponseBody<T> = serde_json::from_slice(&response_body)
+			.map_err(|error| {
+				println!("Encountered parsing error: {error}");
+				println!("Dumping file to: data_dump.json");
+				Self::dump_json_to_file(&response_body, "data_dump.json")
+					.expect("Failed to dump JSON to file");
+
+				MessageError::BodyParseError
+			})?;
+
+		let api_response = ApiResponse {
+			body: api_response_body,
+			status_code: response_code,
+		};
+
+		Ok(api_response)
+	}
+
+	// Builds and sends the request.
+	// Returns the raw HTTP response.
+	async fn send_http_request(
 		&self,
 		method: Method,
 		endpoint: &str,
@@ -173,115 +256,5 @@ impl<V> Messenger<V> {
 			.map_err(|_| MessageError::RequestSendError)?;
 
 		return Ok(response);
-	}
-}
-
-impl Messenger<NotVerified> {
-	pub fn new(base_url: String, app_name: String, private_sign_key: PKey<Private>) -> Self {
-		Self {
-			base_url,
-			app_name,
-			http_client: reqwest::Client::new(),
-			private_sign_key,
-			verification_data: NotVerified,
-			authentication_token: None,
-		}
-	}
-
-	pub fn make_verified(self, bunq_public_key: PKey<Public>) -> Messenger<Verified> {
-		Messenger {
-			base_url: self.base_url,
-			app_name: self.app_name,
-			http_client: self.http_client,
-			private_sign_key: self.private_sign_key,
-			verification_data: Verified { bunq_public_key },
-			authentication_token: self.authentication_token,
-		}
-	}
-}
-
-impl Messenger<Verified> {
-	/// Verifies the signature of given body
-	fn verify_body_signature(&self, signature: &str, body: &[u8]) -> bool {
-		let decoded_signature = general_purpose::STANDARD
-			.decode(signature)
-			.expect("Failed to decode Bunq's signature");
-
-		let mut verifier = Verifier::new(
-			MessageDigest::sha256(),
-			&self.verification_data.bunq_public_key,
-		)
-		.expect("Failed to create signature verifier");
-
-		verifier
-			.update(body)
-			.expect("Failed to pass response body to signature verifier");
-
-		let is_valid = verifier
-			.verify(&decoded_signature)
-			.expect("Failed to check API response's signature");
-
-		return is_valid;
-	}
-
-	/// Sends the request, and returns the verified parsed expected response
-	pub async fn send<T>(
-		&self,
-		method: Method,
-		endpoint: &str,
-		body: Option<String>,
-	) -> Result<ApiResponse<T>, MessageError>
-	where
-		T: DeserializeOwned,
-	{
-		let unverified_response = self
-			.send_request(method.clone(), endpoint, body.clone())
-			.await?;
-
-		let body_signature = unverified_response
-			.headers()
-			.get("X-Bunq-Server-Signature")
-			.ok_or_else(|| MessageError::InvalidServerSignature {
-				reason: format!("No key available in Bunq's response"),
-			})?
-			.to_str()
-			.map_err(|_| MessageError::InvalidServerSignature {
-				reason: format!("Failed to parse Bunq's signature to a string"),
-			})?
-			.to_string();
-
-		let response_code = unverified_response.status();
-		let response_body = unverified_response
-			.bytes()
-			.await
-			.map_err(|_| MessageError::NoResponseBody)?;
-
-		if !self.verify_body_signature(&body_signature, &response_body) {
-			Err(MessageError::InvalidServerSignature {
-				reason: format!("Incorrect signature in Bunq's response"),
-			})?;
-		}
-
-		let a = String::from_utf8_lossy(&response_body).to_string();
-
-		// TODO: Remove this
-		println!("\n\nResponse: \n{a:?}");
-
-		let api_response_body: ApiResponseBody<T> = serde_json::from_slice(&response_body)
-			.map_err(|error| {
-				println!("Encountered parsing error: {error}");
-				println!("Dumping file to: data_dump.json");
-				Self::dump_json_to_file(&response_body, "data_dump.json")
-					.expect("Failed to dump JSON to file");
-
-				MessageError::BodyParseError
-			})?;
-
-		let api_response = ApiResponse {
-			body: api_response_body,
-			status_code: response_code,
-		};
-
-		Ok(api_response)
 	}
 }
