@@ -2,9 +2,7 @@ use std::{env, time::Duration};
 
 use bunqers::{
 	client::{Client, SessionContext},
-	client_builder::{
-		ClientBuilder, Initialized, Installed, Registered, UncheckedSession, Uninitialized,
-	},
+	client_builder::{ClientBuilder, Installed, Registered, UncheckedSession},
 };
 use openssl::{
 	pkey::{PKey, Private, Public},
@@ -25,10 +23,10 @@ pub struct ContextStorage {
 	session_token: Option<String>,
 	owner_id: Option<u32>,
 }
-impl From<SessionContext> for ContextStorage {
-	fn from(context: SessionContext) -> Self {
+impl ContextStorage {
+	fn from_session(context: SessionContext, private_key: PKey<Private>) -> Self {
 		Self {
-			private_key: Some(serialize_private_key(context.private_key)),
+			private_key: Some(serialize_private_key(private_key)),
 			installation_token: Some(context.installation_token),
 			bunq_public_key: Some(serialize_public_key(context.bunq_public_key)),
 			bunq_api_key: Some(context.bunq_api_key),
@@ -37,34 +35,23 @@ impl From<SessionContext> for ContextStorage {
 			owner_id: Some(context.owner_id),
 		}
 	}
-}
-impl From<Registered> for ContextStorage {
-	fn from(context: Registered) -> Self {
+
+	fn from_registration(context: Registered, private_key: PKey<Private>) -> Self {
 		Self {
-			private_key: Some(serialize_private_key(context.private_key)),
+			private_key: Some(serialize_private_key(private_key)),
 			installation_token: Some(context.installation_token),
 			bunq_public_key: Some(serialize_public_key(context.bunq_public_key)),
 			registered_device_id: Some(context.registered_device_id),
 			..Default::default()
 		}
 	}
-}
-impl From<Installed> for ContextStorage {
-	fn from(context: Installed) -> Self {
+	fn from_installation(context: Installed, private_key: PKey<Private>) -> Self {
 		Self {
-			private_key: Some(serialize_private_key(context.private_key)),
+			private_key: Some(serialize_private_key(private_key)),
 			installation_token: Some(context.installation_token),
 			bunq_public_key: Some(serialize_public_key(context.bunq_public_key)),
 			..Default::default()
 		}
-	}
-}
-impl From<Initialized> for ContextStorage {
-	fn from(context: Initialized) -> Self {
-		return Self {
-			private_key: Some(serialize_private_key(context.private_key)),
-			..Default::default()
-		};
 	}
 }
 
@@ -72,73 +59,83 @@ enum ContextType {
 	WithSession(UncheckedSession),
 	WithRegistration(Registered),
 	WithInstallation(Installed),
-	WithInitialization(Initialized),
 	Uninitialized,
 }
 
-impl From<ContextStorage> for ContextType {
-	fn from(storage: ContextStorage) -> Self {
+impl ContextType {
+	fn from_storage(storage: ContextStorage) -> Option<(Self, PKey<Private>)> {
 		if let Some(session_token) = storage.session_token {
-			return Self::WithSession(UncheckedSession {
-				session_token,
-				registered_device_id: storage
-					.registered_device_id
-					.expect("Cannot use session token without registering device first"),
-				bunq_api_key: storage
-					.bunq_api_key
-					.expect("Cannot use session without having Bunq's API key"),
-				installation_token: storage
-					.installation_token
-					.expect("Cannot use session token without installing device first"),
-				bunq_public_key: parse_public_key(storage.bunq_public_key.expect(
-					"Cannot use session token without having Bunq's public key (retrieved from installing)",
-				)),
-				private_key: parse_private_key(
-					storage
-						.private_key
-						.expect("Cannot use session token without having a private key"),
-				),
-			});
+			// Looks like a session was used before
+			let registered_device_id = storage
+				.registered_device_id
+				.expect("Cannot use session token without registering device first");
+			let bunq_api_key = storage
+				.bunq_api_key
+				.expect("Cannot use session without having Bunq's API key");
+			let installation_token = storage
+				.installation_token
+				.expect("Cannot use session token without installing device first");
+			let bunq_public_key = parse_public_key(storage.bunq_public_key.expect(
+				"Cannot use session token without having Bunq's public key (retrieved from installing)",
+			));
+			let private_key = parse_private_key(
+				storage
+					.private_key
+					.expect("Cannot use session token without having a private key"),
+			);
+
+			return Some((
+				Self::WithSession(UncheckedSession {
+					session_token,
+					registered_device_id,
+					bunq_api_key,
+					installation_token,
+					bunq_public_key,
+				}),
+				private_key,
+			));
 		};
 		if let Some(registered_device_id) = storage.registered_device_id {
-			return Self::WithRegistration(Registered {
-				registered_device_id,
-				bunq_api_key: storage
-					.bunq_api_key
-					.expect("Cannot use device registration without having Bunq's API key"),
-				installation_token: storage
-					.installation_token
-					.expect("Cannot use device registration without installing device first"),
-				bunq_public_key: parse_public_key(storage.bunq_public_key.expect(
-					"Cannot use device registration without having Bunq's public key (retrieved from installing)",
-				)),
-				private_key: parse_private_key(
+			return Some((
+				Self::WithRegistration(Registered {
+					registered_device_id,
+					bunq_api_key: storage
+						.bunq_api_key
+						.expect("Cannot use device registration without having Bunq's API key"),
+					installation_token: storage
+						.installation_token
+						.expect("Cannot use device registration without installing device first"),
+					bunq_public_key: parse_public_key(storage.bunq_public_key.expect(
+						"Cannot use device registration without having Bunq's public key (retrieved from installing)",
+					)),
+				}),
+				parse_private_key(
 					storage
 						.private_key
 						.expect("Cannot use device registration without having a private key"),
 				),
-			});
+			));
 		}
 		if let Some(installation_token) = storage.installation_token {
-			return Self::WithInstallation(Installed {
-				installation_token,
-				bunq_public_key: parse_public_key(storage.bunq_public_key.expect(
-					"Cannot use device installation without having Bunq's public key (retrieved from installing)",
-				)),
-				private_key: parse_private_key(
+			return Some((
+				Self::WithInstallation(Installed {
+					installation_token,
+					bunq_public_key: parse_public_key(storage.bunq_public_key.expect(
+						"Cannot use device installation without having Bunq's public key (retrieved from installing)",
+					)),
+				}),
+				parse_private_key(
 					storage
 						.private_key
 						.expect("Cannot use device installation without having a private key"),
 				),
-			});
+			));
 		}
 		if let Some(private_key) = storage.private_key {
-			return Self::WithInitialization(Initialized {
-				private_key: parse_private_key(private_key),
-			});
+			return Some((Self::Uninitialized, parse_private_key(private_key)));
 		}
 
-		Self::Uninitialized
+		None
 	}
 }
 
@@ -178,96 +175,216 @@ fn serialize_private_key(key: PKey<Private>) -> String {
 	.to_string()
 }
 
-async fn try_from_session(context: UncheckedSession) -> Result<Client, ()> {
-	println!("Testing existing session...");
-	match ClientBuilder::from_unchecked_session(context)
-		.check_session()
-		.await
+/// Tries using the given session to build a Client.
+/// If it fails, it will retry registering, installing and creating a new private key
+async fn try_reuse_session(
+	context: UncheckedSession,
+	api_base_url: String,
+	app_name: String,
+	private_key: PKey<Private>,
+) -> Client {
+	print!("Checking session... ");
+	match ClientBuilder::from_unchecked_session(
+		context,
+		api_base_url.clone(),
+		app_name.clone(),
+		private_key.clone(),
+	)
+	.check_session()
+	.await
 	{
-		Ok(builder) => Ok(builder.build()),
+		Ok(builder) => {
+			println!("Session is valid!");
+			builder.build()
+		}
 		Err(error) => {
-			// If creating session failed, see if we can register this device again
+			// If the session is not valid, try creating a new session
 			println!("Session is invalid!");
 			std::thread::sleep(Duration::from_secs(3));
-			Ok(try_from_registration(error.context.into()).await?)
+			return try_use_registration(error.context.into(), api_base_url, app_name, private_key)
+				.await;
 		}
 	}
 }
-async fn try_from_registration(context: Registered) -> Result<Client, ()> {
-	println!("Trying to create new session...");
-	match ClientBuilder::from_registration(context)
-		.create_session()
-		.await
+
+/// Tries creating a new session with a registration
+async fn try_use_registration(
+	context: Registered,
+	api_base_url: String,
+	app_name: String,
+	private_key: PKey<Private>,
+) -> Client {
+	print!("Creating new session... ");
+	match ClientBuilder::from_registration(
+		context,
+		api_base_url.clone(),
+		app_name.clone(),
+		private_key.clone(),
+	)
+	.create_session()
+	.await
 	{
-		Ok(builder) => Ok(builder.build()),
+		Ok(builder) => {
+			ContextStorage::from_session(builder.context.clone(), builder.private_key.clone())
+				.store()
+				.await;
+			println!("Created session!");
+
+			builder.build()
+		}
 		Err(error) => {
-			println!("Failed to create new session!");
+			// If creating a session failed, try registering this device again
+			println!("Failed to create session!");
 			std::thread::sleep(Duration::from_secs(3));
-			Ok(
-				try_from_installation(error.context.bunq_api_key.clone(), error.context.into())
-					.await?,
+			return try_use_installation(
+				error.context.clone().into(),
+				error.context.bunq_api_key,
+				api_base_url,
+				app_name,
+				private_key,
 			)
+			.await;
 		}
 	}
 }
-async fn try_from_installation(bunq_api_key: String, context: Installed) -> Result<Client, ()> {
-	println!("Trying to register device...");
-	match ClientBuilder::from_installation(context)
-		.register_device(bunq_api_key.clone(), format!("my-test-device"))
-		.await
+
+/// Tries registering this device with given installation
+async fn try_use_installation(
+	context: Installed,
+	bunq_api_key: String,
+	api_base_url: String,
+	app_name: String,
+	private_key: PKey<Private>,
+) -> Client {
+	print!("Registering device... ");
+	match ClientBuilder::from_installation(
+		context,
+		api_base_url.clone(),
+		app_name.clone(),
+		private_key.clone(),
+	)
+	.register_device(bunq_api_key.clone(), format!("my-test-device"))
+	.await
 	{
-		Ok(builder) => Ok(builder.create_session().await.map_err(|_| ())?.build()),
-		Err(error) => {
+		Ok(builder) => {
+			ContextStorage::from_registration(builder.context.clone(), builder.private_key.clone())
+				.store()
+				.await;
+			println!("Registered device!");
+
+			println!("-> Creating new session...");
+			let builder = builder
+				.create_session()
+				.await
+				.expect("Failed to create session!");
+			ContextStorage::from_session(builder.context.clone(), builder.private_key.clone())
+				.store()
+				.await;
+
+			builder.build()
+		}
+		Err(_error) => {
+			// Failed to register device, try to install device again
+			// with existing private key
 			println!("Failed to register device!");
 			std::thread::sleep(Duration::from_secs(3));
-			Ok(try_from_initialization(bunq_api_key, error.context.into()).await?)
+			return try_install_with_existing_key(
+				api_base_url,
+				app_name,
+				bunq_api_key,
+				private_key,
+			)
+			.await;
 		}
 	}
 }
-async fn try_from_initialization(bunq_api_key: String, context: Initialized) -> Result<Client, ()> {
-	println!("Trying to install device...");
-	match ClientBuilder::from_initialization(context)
+
+/// Tries to create a session with a complete new client builder while
+/// reusing existing private key
+async fn try_install_with_existing_key(
+	api_base_url: String,
+	app_name: String,
+	bunq_api_key: String,
+	private_key: PKey<Private>,
+) -> Client {
+	print!("Installing device... ");
+	match ClientBuilder::new_with_key(api_base_url.clone(), app_name.clone(), private_key.clone())
 		.install_device()
 		.await
 	{
-		Ok(builder) => Ok(builder
-			.register_device(bunq_api_key.clone(), format!("my-test-device"))
-			.await
-			.map_err(|_| ())?
-			.create_session()
-			.await
-			.map_err(|_| ())?
-			.build()),
+		Ok(builder) => {
+			ContextStorage::from_installation(builder.context.clone(), builder.private_key.clone())
+				.store()
+				.await;
+			println!("Installed device!");
+
+			println!("-> Registering device...");
+			let builder = builder
+				.register_device(bunq_api_key.clone(), format!("my-test-device"))
+				.await
+				.expect("Failed to register device!");
+			ContextStorage::from_registration(builder.context.clone(), builder.private_key.clone())
+				.store()
+				.await;
+
+			println!("-> Creating session...");
+			let builder = builder
+				.create_session()
+				.await
+				.expect("Failed to create session!");
+			ContextStorage::from_session(builder.context.clone(), builder.private_key.clone())
+				.store()
+				.await;
+
+			builder.build()
+		}
 		Err(_error) => {
 			println!("Failed to install device!");
 			std::thread::sleep(Duration::from_secs(3));
-			Ok(try_from_uninitialized(bunq_api_key, Uninitialized).await?)
+			return try_install_with_new_key(api_base_url, app_name, bunq_api_key).await;
 		}
 	}
 }
-async fn try_from_uninitialized(
+
+/// Tries to create a session with a complete new client builder
+async fn try_install_with_new_key(
+	api_base_url: String,
+	app_name: String,
 	bunq_api_key: String,
-	_context: Uninitialized,
-) -> Result<Client, ()> {
-	println!("Trying to create private key...");
-	match ClientBuilder::new().create_private_key() {
-		Ok(builder) => Ok(builder
-			.install_device()
-			.await
-			.map_err(|_| ())?
-			.register_device(bunq_api_key.clone(), format!("my-test-device"))
-			.await
-			.map_err(|_| ())?
-			.create_session()
-			.await
-			.map_err(|_| ())?
-			.build()),
-		Err(_error) => {
-			// Well, if creating a private key fails, we really messed up somewhere
-			println!("Failed to create private key!");
-			Err(())
-		}
-	}
+) -> Client {
+	println!("Starting from scratch!");
+	println!("-> Creating private key...");
+	let builder = ClientBuilder::new_without_key(api_base_url, app_name)
+		.expect("Failed to create private key");
+
+	println!("-> Installing device...");
+	let builder = builder
+		.install_device()
+		.await
+		.expect("Failed to install device!");
+	ContextStorage::from_installation(builder.context.clone(), builder.private_key.clone())
+		.store()
+		.await;
+
+	println!("-> Registering device...");
+	let builder = builder
+		.register_device(bunq_api_key.clone(), format!("my-test-device"))
+		.await
+		.expect("Failed to register device!");
+	ContextStorage::from_registration(builder.context.clone(), builder.private_key.clone())
+		.store()
+		.await;
+
+	println!("-> Creating session...");
+	let builder = builder
+		.create_session()
+		.await
+		.expect("Failed to create session!");
+	ContextStorage::from_session(builder.context.clone(), builder.private_key.clone())
+		.store()
+		.await;
+
+	builder.build()
 }
 
 #[tokio::main]
@@ -278,25 +395,53 @@ async fn main() -> Result<(), std::io::Error> {
 
 	let storage = ContextStorage::load().await.unwrap_or_default();
 
-	// TODO: Also store intermediate context states
-	let context: ContextType = storage.into();
-	let client = match context {
-		ContextType::WithSession(unchecked_session) => try_from_session(unchecked_session).await,
-		ContextType::WithRegistration(registered) => try_from_registration(registered).await,
-		ContextType::WithInstallation(installed) => {
-			try_from_installation(bunq_api_key, installed).await
-		}
-		ContextType::WithInitialization(initialized) => {
-			try_from_initialization(bunq_api_key, initialized).await
-		}
-		ContextType::Uninitialized => try_from_uninitialized(bunq_api_key, Uninitialized).await,
-	}
-	.expect("Failed to create session and client");
+	let app_name = format!("example-app-name");
+	let api_base_url = format!("https://api.bunq.com/v1");
 
-	print!("Saving new session context... ");
-	let new_storage = ContextStorage::from(client.context);
+	// TODO: Also store intermediate context states
+	let context = ContextType::from_storage(storage);
+
+	let client = match context {
+		Some((context, private_key)) => match context {
+			ContextType::WithSession(unchecked_session) => {
+				try_reuse_session(unchecked_session, api_base_url, app_name, private_key).await
+			}
+			ContextType::WithRegistration(registered) => {
+				try_use_registration(registered, api_base_url, app_name, private_key).await
+			}
+			ContextType::WithInstallation(installed) => {
+				try_use_installation(installed, bunq_api_key, api_base_url, app_name, private_key)
+					.await
+			}
+			ContextType::Uninitialized => {
+				try_install_with_existing_key(api_base_url, app_name, bunq_api_key, private_key)
+					.await
+			}
+		},
+		None => {
+			// Nothing was found, create from scratch
+			try_install_with_new_key(api_base_url, app_name, bunq_api_key).await
+		}
+	};
+
+	println!("Succesfully created Client object with valid session");
+
+	// Fetch user
+	std::thread::sleep(Duration::from_secs(3));
+	println!(
+		"Hello, {}!",
+		client
+			.get_user()
+			.await
+			.into_result()
+			.expect("Failed to fetch userdata")
+			.user_person
+			.display_name
+	);
+
+	let new_storage = ContextStorage::from_session(client.context, client.private_key);
 	new_storage.store().await;
-	println!("Saved!");
+	println!("You can view updated context data in: {}", CONTEXT_FILENAME);
 
 	Ok(())
 }
