@@ -7,7 +7,7 @@ use reqwest::Method;
 
 use crate::{
 	client::{Client, SessionContext},
-	messenger::{ApiResponse, Messenger},
+	messenger::{ApiErrorResponse, ApiResponse, MessageError, Messenger},
 	types::{
 		CreateDeviceServer, CreateInstallation, CreateSession, DeviceServerSmall, Installation,
 		Session as BunqSession, Single, User,
@@ -90,7 +90,8 @@ pub enum BuildErrorReason {
 	KeySerialization(ErrorStack),
 	KeyDeserializationError(ErrorStack),
 	BunqRequestError,
-	BunqResponseError, // TODO: Create better response error
+	BunqInvalidResponse(MessageError),
+	BunqResponseApiError(ApiErrorResponse),
 }
 
 impl ClientBuilder<()> {
@@ -148,13 +149,13 @@ impl ClientBuilder<()> {
 			.messenger
 			.send_unverified(Method::POST, "installation", Some(body_text))
 			.await
-			.map_err(|_| BuildError {
-				reason: BuildErrorReason::BunqResponseError,
+			.map_err(|error| BuildError {
+				reason: BuildErrorReason::BunqInvalidResponse(error),
 				context: self.context.clone(),
 			})?;
 
-		let result = response.into_result().map_err(|_| BuildError {
-			reason: BuildErrorReason::BunqResponseError,
+		let result = response.into_result().map_err(|error| BuildError {
+			reason: BuildErrorReason::BunqResponseApiError(error),
 			context: self.context.clone(),
 		})?;
 
@@ -171,13 +172,19 @@ impl ClientBuilder<()> {
 			context: self.context.clone(),
 		})?;
 
+		// Also update messenger's authentication token
+		let installation_token = result.token.token;
+		let mut messenger = self.messenger;
+		messenger.set_authentication_token(Some(installation_token.clone()));
+		messenger.set_bunq_public_sign_key(Some(bunq_public_key.clone()));
+
 		Ok(ClientBuilder {
 			api_base_url: self.api_base_url,
 			app_name: self.app_name,
 			private_key: self.private_key,
-			messenger: self.messenger,
+			messenger,
 			context: Installed {
-				installation_token: result.token.token,
+				installation_token,
 				bunq_public_key,
 			},
 		})
@@ -229,8 +236,8 @@ impl ClientBuilder<Installed> {
 			.messenger
 			.send(Method::POST, "device-server", Some(body))
 			.await
-			.map_err(|_| BuildError {
-				reason: BuildErrorReason::BunqResponseError,
+			.map_err(|error| BuildError {
+				reason: BuildErrorReason::BunqInvalidResponse(error),
 				context: self.context.clone(),
 			})?;
 		let result = response.into_result().map_err(|error| {
@@ -296,26 +303,29 @@ impl ClientBuilder<Registered> {
 			.messenger
 			.send(Method::POST, "session-server", Some(body))
 			.await
-			.map_err(|_| BuildError {
-				reason: BuildErrorReason::BunqResponseError,
+			.map_err(|error| BuildError {
+				reason: BuildErrorReason::BunqInvalidResponse(error),
 				context: self.context.clone(),
 			})?;
-		let result = response.into_result().map_err(|_| BuildError {
-			reason: BuildErrorReason::BunqResponseError,
+		let result = response.into_result().map_err(|error| BuildError {
+			reason: BuildErrorReason::BunqResponseApiError(error),
 			context: self.context.clone(),
 		})?;
 
 		let session_token = result.token.token;
 		let owner_id = result.user_person.id;
 
+		let mut messenger = self.messenger;
+		messenger.set_authentication_token(Some(session_token.clone()));
+
 		Ok(ClientBuilder {
 			api_base_url: self.api_base_url,
 			app_name: self.app_name,
 			private_key: self.private_key.clone(),
-			messenger: self.messenger,
+			messenger: messenger,
 			context: SessionContext {
 				owner_id: owner_id,
-				session_token: session_token,
+				session_token,
 				registered_device_id: self.context.registered_device_id,
 				bunq_api_key: self.context.bunq_api_key,
 				installation_token: self.context.installation_token,

@@ -16,6 +16,7 @@ pub struct ApiErrorResponse {
 	pub status_code: StatusCode,
 	pub reasons: Vec<ApiErrorDescription>,
 }
+#[derive(Debug)]
 pub struct ApiResponse<T> {
 	body: ApiResponseBody<T>,
 	status_code: StatusCode,
@@ -35,11 +36,14 @@ impl<T> ApiResponse<T> {
 
 #[derive(Debug)]
 pub enum MessageError {
-	NoResponseBody,
+	NoResponseBody(StatusCode),
 	BodyParseError,
-	RequestBuildError,
+	// RequestBuildError,
 	RequestSendError,
-	InvalidServerSignature { reason: String },
+	InvalidServerSignature {
+		reason: String,
+		api_response: String, // TODO: Use ApiResponse instead
+	},
 }
 
 pub struct Messenger {
@@ -68,6 +72,15 @@ impl Messenger {
 			bunq_public_sign_key,
 			authentication_token,
 		}
+	}
+
+	/// Updates the token with which outgoing messages are authenticated
+	pub fn set_authentication_token(&mut self, authentication_token: Option<String>) {
+		self.authentication_token = authentication_token;
+	}
+	/// Updates the signature we expect from Bunq's responses
+	pub fn set_bunq_public_sign_key(&mut self, bunq_public_sign_key: Option<PKey<Public>>) {
+		self.bunq_public_sign_key = bunq_public_sign_key;
 	}
 
 	/// Signs the provided request body with the private key
@@ -113,7 +126,7 @@ impl Messenger {
 		let response_body = unverified_response
 			.bytes()
 			.await
-			.map_err(|_| MessageError::NoResponseBody)?;
+			.map_err(|_| MessageError::NoResponseBody(response_code))?;
 
 		let response_body: ApiResponseBody<T> =
 			serde_json::from_slice(&response_body).map_err(|error| {
@@ -138,6 +151,7 @@ impl Messenger {
 			.decode(signature)
 			.expect("Failed to decode Bunq's signature");
 
+		// TODO: Typestate for bunq public key: Verified?
 		let mut verifier = Verifier::new(
 			MessageDigest::sha256(),
 			self.bunq_public_sign_key
@@ -166,36 +180,21 @@ impl Messenger {
 		body: Option<String>,
 	) -> Result<ApiResponse<T>, MessageError>
 	where
-		T: DeserializeOwned,
+		T: DeserializeOwned + std::fmt::Debug,
 	{
 		let unverified_response = self
 			.send_http_request(method, endpoint, body.clone())
 			.await?;
 
-		// Verify response signature
-		let body_signature = unverified_response
+		let server_signature = unverified_response
 			.headers()
 			.get("X-Bunq-Server-Signature")
-			.ok_or_else(|| MessageError::InvalidServerSignature {
-				reason: format!("No key available in Bunq's response"),
-			})?
-			.to_str()
-			.map_err(|_| MessageError::InvalidServerSignature {
-				reason: format!("Failed to parse Bunq's signature to a string"),
-			})?
-			.to_string();
-
+			.cloned();
 		let response_code = unverified_response.status();
 		let response_body = unverified_response
 			.bytes()
 			.await
-			.map_err(|_| MessageError::NoResponseBody)?;
-
-		if !self.verify_body_signature(&body_signature, &response_body) {
-			Err(MessageError::InvalidServerSignature {
-				reason: format!("Incorrect signature in Bunq's response"),
-			})?;
-		}
+			.map_err(|_| MessageError::NoResponseBody(response_code))?;
 
 		let api_response_body: ApiResponseBody<T> = serde_json::from_slice(&response_body)
 			.map_err(|error| {
@@ -211,6 +210,26 @@ impl Messenger {
 			body: api_response_body,
 			status_code: response_code,
 		};
+
+		// Verify response signature before returning
+		let body_signature = server_signature
+			.ok_or_else(|| MessageError::InvalidServerSignature {
+				reason: format!("No key available in Bunq's response"),
+				api_response: format!("{:?}", api_response),
+			})?
+			.to_str()
+			.map_err(|_| MessageError::InvalidServerSignature {
+				reason: format!("Failed to parse Bunq's signature to a string"),
+				api_response: format!("{:?}", api_response),
+			})?
+			.to_string();
+
+		if !self.verify_body_signature(&body_signature, &response_body) {
+			Err(MessageError::InvalidServerSignature {
+				reason: format!("Incorrect signature in Bunq's response"),
+				api_response: format!("{:?}", api_response),
+			})?;
+		}
 
 		Ok(api_response)
 	}
@@ -246,7 +265,8 @@ impl Messenger {
 
 		let request = request
 			.build()
-			.map_err(|_| MessageError::RequestBuildError)?;
+			.expect("Failed to build request for some reason");
+		// .map_err(|_| MessageError::RequestBuildError)?;
 
 		// And send it
 		let response = self
