@@ -219,10 +219,10 @@ impl ClientBuilder<Installed> {
 	pub async fn register_device(
 		self,
 		bunq_api_key: String,
-		device_description: String,
+		device_description: &str,
 	) -> Result<ClientBuilder<Registered>, BuildError<Installed>> {
 		let body = CreateDeviceServer {
-			bunq_api_key: bunq_api_key.clone(),
+			bunq_api_key: &bunq_api_key,
 			description: device_description,
 			permitted_ips: Vec::new(),
 		};

@@ -87,10 +87,10 @@ pub struct BunqId {
 ///////////// Device Server ////////////
 
 #[derive(Debug, Serialize)]
-pub struct CreateDeviceServer {
+pub struct CreateDeviceServer<'a> {
 	#[serde(rename = "secret")]
-	pub bunq_api_key: String,
-	pub description: String,
+	pub bunq_api_key: &'a str,
+	pub description: &'a str,
 	pub permitted_ips: Vec<String>,
 }
 

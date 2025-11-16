@@ -13,16 +13,14 @@ async fn main() -> Result<(), std::io::Error> {
 	let bunq_api_key = args.next().expect("No API key passed as parameter");
 	println!("Entered API key: {bunq_api_key}");
 
-	let app_name = format!("example-app-name");
 	let api_base_url = format!("https://api.bunq.com/v1");
-	let device_description = format!("my-test-device");
 
-	let client = ClientBuilder::new_without_key(api_base_url, app_name)
+	let client = ClientBuilder::new_without_key(api_base_url, "example-app-name".into())
 		.expect("Failed to create private key")
 		.install_device()
 		.await
 		.expect("Failed to install device")
-		.register_device(bunq_api_key, device_description)
+		.register_device(bunq_api_key, "my-test-device")
 		.await
 		.expect("Failed to register device")
 		.create_session()

@@ -187,7 +187,7 @@ async fn try_reuse_session(
 	context: UncheckedSession,
 	api_base_url: String,
 	app_name: String,
-	device_description: String,
+	device_description: &str,
 	private_key: PKey<Private>,
 ) -> Client {
 	print!("Checking session... ");
@@ -225,7 +225,7 @@ async fn try_use_registration(
 	context: Registered,
 	api_base_url: String,
 	app_name: String,
-	device_description: String,
+	device_description: &str,
 	private_key: PKey<Private>,
 ) -> Client {
 	print!("Creating new session... ");
@@ -269,7 +269,7 @@ async fn try_use_installation(
 	bunq_api_key: String,
 	api_base_url: String,
 	app_name: String,
-	device_description: String,
+	device_description: &str,
 	private_key: PKey<Private>,
 ) -> Client {
 	print!("Registering device... ");
@@ -279,7 +279,7 @@ async fn try_use_installation(
 		app_name.clone(),
 		private_key.clone(),
 	)
-	.register_device(bunq_api_key.clone(), format!("my-test-device"))
+	.register_device(bunq_api_key.clone(), device_description)
 	.await
 	{
 		Ok(builder) => {
@@ -321,7 +321,7 @@ async fn try_use_installation(
 async fn try_install_with_existing_key(
 	api_base_url: String,
 	app_name: String,
-	device_description: String,
+	device_description: &str,
 	bunq_api_key: String,
 	private_key: PKey<Private>,
 ) -> Client {
@@ -338,7 +338,7 @@ async fn try_install_with_existing_key(
 
 			println!("-> Registering device...");
 			let builder = builder
-				.register_device(bunq_api_key.clone(), format!("my-test-device"))
+				.register_device(bunq_api_key.clone(), device_description)
 				.await
 				.expect("Failed to register device!");
 			ContextStorage::from_registration(builder.context.clone(), builder.private_key.clone())
@@ -374,7 +374,7 @@ async fn try_install_with_existing_key(
 async fn try_install_with_new_key(
 	api_base_url: String,
 	app_name: String,
-	device_description: String,
+	device_description: &str,
 	bunq_api_key: String,
 ) -> Client {
 	println!("Starting from scratch!");
@@ -420,9 +420,9 @@ async fn main() -> Result<(), std::io::Error> {
 
 	let storage = ContextStorage::load().await.unwrap_or_default();
 
-	let app_name = format!("example-app-name");
-	let api_base_url = format!("https://api.bunq.com/v1");
-	let device_description = format!("my-test-device");
+	let app_name = "example-app-name".into();
+	let api_base_url = "https://api.bunq.com/v1".into();
+	let device_description = "my-test-device";
 
 	let context = ContextType::from_storage(storage);
 
@@ -463,8 +463,8 @@ async fn main() -> Result<(), std::io::Error> {
 				try_install_with_existing_key(
 					api_base_url,
 					app_name,
-					bunq_api_key,
 					device_description,
+					bunq_api_key,
 					private_key,
 				)
 				.await
