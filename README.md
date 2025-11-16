@@ -18,17 +18,13 @@ Convenience Client for using Bunq API in Rust.
 let bunq_api_key = "your-api-key".into();
 let api_base_url = "https://api.bunq.com/v1".into();
 
-let client = ClientBuilder::new_without_key(api_base_url, "example-app-name".into())
-	.expect("Failed to create private key")
+let client = ClientBuilder::new_without_key(api_base_url, "example-app-name".into())?
 	.install_device()
-	.await
-	.expect("Failed to install device")
+	.await?
 	.register_device(bunq_api_key, "my-test-device")
-	.await
-	.expect("Failed to register device")
+	.await?
 	.create_session()
-	.await
-	.expect("Failed to create session")
+	.await?
 	.build();
 
 // Use the client object for fetching data from the API
