@@ -1,3 +1,28 @@
+//! Typestate builder for constructing a [`Client`].
+//!
+//! The builder enforces the correct Bunq setup order at compile time:
+//!
+//! ```text
+//! () ──install_device()──► Installed ──register_device()──► Registered
+//!                                                               │
+//!                                              create_session() │
+//!                                                               ▼
+//!                                                       SessionContext
+//!                                                               │
+//!                                                      build() │
+//!                                                               ▼
+//!                                                           Client
+//! ```
+//!
+//! Each state transition calls one Bunq API endpoint. It is impossible to call
+//! `create_session` without first going through `install_device` and
+//! `register_device` — the compiler will reject it.
+//!
+//! For subsequent runs where device registration is already done, use
+//! [`ClientBuilder::from_registration`] to start directly at the `Registered`
+//! state, or [`ClientBuilder::from_unchecked_session`] to attempt reusing a
+//! cached session token.
+
 use openssl::{
 	error::ErrorStack,
 	pkey::{PKey, Private, Public},
@@ -26,7 +51,12 @@ impl From<SessionContext> for UncheckedSession {
 	}
 }
 
-/// Has a session, but we are unsure if it is still valid
+/// Builder state: device is registered and a session token exists, but the
+/// token has not yet been validated.
+///
+/// Use [`ClientBuilder::from_unchecked_session`] to enter this state when
+/// restoring a session from e.g. disk, then call
+/// [`ClientBuilder::check_session`] to validate it.
 pub struct UncheckedSession {
 	pub session_token: String,
 	pub registered_device_id: u32,
@@ -46,7 +76,11 @@ impl From<UncheckedSession> for Registered {
 	}
 }
 
-/// Fully ready to create a session
+/// Builder state: device is registered and ready to create a session.
+///
+/// Obtained after [`ClientBuilder::register_device`] succeeds, or constructed
+/// directly via [`ClientBuilder::from_registration`] when restoring a
+/// persisted [`crate::InstallationContext`].
 #[derive(Clone, Debug)]
 pub struct Registered {
 	pub registered_device_id: u32,
@@ -64,12 +98,18 @@ impl From<Registered> for Installed {
 	}
 }
 
+/// Builder state: the `/installation` endpoint has been called and Bunq's
+/// public key is available, but no device has been registered yet.
 #[derive(Clone, Debug)]
 pub struct Installed {
 	pub installation_token: String,
 	pub bunq_public_key: PKey<Public>,
 }
 
+/// Typestate builder for constructing a [`Client`].
+///
+/// The type parameter `T` represents the current builder state. See the
+/// [module-level documentation](self) for the full state diagram.
 pub struct ClientBuilder<T> {
 	pub private_key: PKey<Private>,
 	pub api_base_url: String,
@@ -78,24 +118,38 @@ pub struct ClientBuilder<T> {
 	pub context: T,
 }
 
+/// An error returned when a builder state transition fails.
 #[derive(Debug)]
 pub struct BuildError<T> {
+	/// The reason the transition failed.
 	pub reason: BuildErrorReason,
+	/// The builder context before the failure, returned so the caller can
+	/// recover or inspect the state.
 	pub context: T,
 }
 
+/// Reasons a [`ClientBuilder`] state transition can fail.
 #[derive(Debug)]
 pub enum BuildErrorReason {
+	/// OpenSSL failed to generate or wrap an RSA key pair.
 	KeyCreationError(ErrorStack),
+	/// OpenSSL failed to serialise a key to PEM.
 	KeySerialization(ErrorStack),
+	/// OpenSSL failed to parse a PEM-encoded key received from Bunq.
 	KeyDeserializationError(ErrorStack),
+	/// The HTTP request could not be built or sent.
 	BunqRequestError,
+	/// The response from Bunq could not be parsed.
 	BunqInvalidResponse(MessageError),
+	/// Bunq returned an API-level error response.
 	BunqResponseApiError(ApiErrorResponse),
 }
 
 impl ClientBuilder<()> {
-	/// Creates a new Client builder with given private key
+	/// Creates a builder using the provided RSA private key.
+	///
+	/// Use this when you already have a key from a previous run and want to
+	/// avoid generating a new one.
 	pub fn new_with_key(
 		api_base_url: String,
 		app_name: String,
@@ -110,7 +164,9 @@ impl ClientBuilder<()> {
 		}
 	}
 
-	/// Creates a new Client builder with a newly generated private key
+	/// Creates a builder with a freshly generated 2048-bit RSA key pair.
+	///
+	/// Returns an error if OpenSSL fails to generate the key.
 	pub fn new_without_key(api_base_url: String, app_name: String) -> Result<Self, BuildError<()>> {
 		let new_key_pair = Rsa::generate(2048).map_err(|error| BuildError {
 			reason: BuildErrorReason::KeyCreationError(error),
@@ -124,8 +180,13 @@ impl ClientBuilder<()> {
 		Ok(Self::new_with_key(api_base_url, app_name, private_key))
 	}
 
-	/// Installs this computer
-	/// By sending our public key and fetching the API's public key
+	/// Calls the Bunq `/installation` endpoint to exchange public keys.
+	///
+	/// Sends the client's public key to Bunq and receives Bunq's public key in
+	/// return. Bunq's key is stored and used to verify response signatures from
+	/// this point onward.
+	///
+	/// On success, advances the builder to the [`Installed`] state.
 	pub async fn install_device(self) -> Result<ClientBuilder<Installed>, BuildError<()>> {
 		let body = CreateInstallation {
 			client_public_key: String::from_utf8_lossy(
@@ -145,6 +206,7 @@ impl ClientBuilder<()> {
 			context: self.context.clone(),
 		})?;
 
+		// Use send_unverified because we do not yet have Bunq's public key.
 		let response: ApiResponse<Installation> = self
 			.messenger
 			.send_unverified(Method::POST, "installation", Some(body_text))
@@ -159,7 +221,7 @@ impl ClientBuilder<()> {
 			context: self.context.clone(),
 		})?;
 
-		// Parse Bunq's public key
+		// Parse Bunq's public key from the response.
 		let bunq_public_key =
 			Rsa::public_key_from_pem(result.bunq_public_key.as_bytes()).map_err(|error| {
 				BuildError {
@@ -172,7 +234,8 @@ impl ClientBuilder<()> {
 			context: self.context.clone(),
 		})?;
 
-		// Also update messenger's authentication token
+		// From now on, sign requests with the installation token and verify
+		// responses with Bunq's public key.
 		let installation_token = result.token.token;
 		let mut messenger = self.messenger;
 		messenger.set_authentication_token(Some(installation_token.clone()));
@@ -192,7 +255,10 @@ impl ClientBuilder<()> {
 }
 
 impl ClientBuilder<Installed> {
-	/// Creates an installed Client builder from given context
+	/// Constructs a builder from a previously obtained [`Installed`] context.
+	///
+	/// Use this to skip the `install_device` step when restoring from a
+	/// persisted [`crate::InstallationContext`] without a device ID.
 	pub fn from_installation(
 		context: Installed,
 		api_base_url: String,
@@ -214,8 +280,12 @@ impl ClientBuilder<Installed> {
 		}
 	}
 
-	/// Registers this computer with the API
-	/// By linking the given API key to the current IP address
+	/// Calls the Bunq `/device-server` endpoint to register this device.
+	///
+	/// Links the provided API key to the current IP address. The returned
+	/// device ID is needed to create sessions later.
+	///
+	/// On success, advances the builder to the [`Registered`] state.
 	pub async fn register_device(
 		self,
 		bunq_api_key: String,
@@ -265,7 +335,10 @@ impl ClientBuilder<Installed> {
 }
 
 impl ClientBuilder<Registered> {
-	/// Creates a new Client builder from a registered context
+	/// Constructs a builder from a persisted [`Registered`] context.
+	///
+	/// Use this to skip both `install_device` and `register_device` when
+	/// restoring from a persisted [`crate::InstallationContext`].
 	pub fn from_registration(
 		context: Registered,
 		api_base_url: String,
@@ -287,7 +360,13 @@ impl ClientBuilder<Registered> {
 		}
 	}
 
-	/// Creates a session
+	/// Calls the Bunq `/session-server` endpoint to create a session.
+	///
+	/// The session token returned by Bunq is stored and used as the
+	/// `X-Bunq-Client-Authentication` header for all subsequent requests.
+	///
+	/// On success, advances the builder to the [`SessionContext`] state, from
+	/// which [`ClientBuilder::build`] produces a ready-to-use [`Client`].
 	pub async fn create_session(
 		self,
 	) -> Result<ClientBuilder<SessionContext>, BuildError<Registered>> {
@@ -321,10 +400,10 @@ impl ClientBuilder<Registered> {
 		Ok(ClientBuilder {
 			api_base_url: self.api_base_url,
 			app_name: self.app_name,
-			private_key: self.private_key.clone(),
-			messenger: messenger,
+			private_key: self.private_key,
+			messenger,
 			context: SessionContext {
-				owner_id: owner_id,
+				owner_id,
 				session_token,
 				registered_device_id: self.context.registered_device_id,
 				bunq_api_key: self.context.bunq_api_key,
@@ -336,7 +415,11 @@ impl ClientBuilder<Registered> {
 }
 
 impl ClientBuilder<UncheckedSession> {
-	/// Creates a Client builder with unchecked session
+	/// Constructs a builder from a session token that has not yet been
+	/// validated.
+	///
+	/// Call [`check_session`](ClientBuilder::check_session) afterwards to
+	/// verify the token is still accepted by the API.
 	pub fn from_unchecked_session(
 		context: UncheckedSession,
 		api_base_url: String,
@@ -358,12 +441,13 @@ impl ClientBuilder<UncheckedSession> {
 		}
 	}
 
-	/// Checks if the session is working
-	/// By requesting user data
+	/// Validates the session by calling `GET /user`.
+	///
+	/// Returns `Ok` if the session is still accepted by Bunq, or `Err` if the
+	/// token has expired or is otherwise invalid.
 	pub async fn check_session(
 		self,
 	) -> Result<ClientBuilder<SessionContext>, BuildError<UncheckedSession>> {
-		// TODO: Avoid repetition?
 		let response: ApiResponse<Single<User>> = self
 			.messenger
 			.send(Method::GET, "user", None)
@@ -374,7 +458,7 @@ impl ClientBuilder<UncheckedSession> {
 			Ok(user) => Ok(ClientBuilder {
 				api_base_url: self.api_base_url,
 				app_name: self.app_name,
-				private_key: self.private_key.clone(),
+				private_key: self.private_key,
 				messenger: self.messenger,
 				context: SessionContext {
 					owner_id: user.user_person.id,
@@ -387,7 +471,7 @@ impl ClientBuilder<UncheckedSession> {
 			}),
 			Err(error) => {
 				// Session is likely expired.
-				// TODO: Check for actual expiration error
+				// TODO: Check for the specific expiration error code.
 				dbg!(error);
 				todo!()
 			}
@@ -396,6 +480,7 @@ impl ClientBuilder<UncheckedSession> {
 }
 
 impl ClientBuilder<SessionContext> {
+	/// Consumes the builder and returns a ready-to-use [`Client`].
 	pub fn build(self) -> Client {
 		Client {
 			api_base_url: self.api_base_url,

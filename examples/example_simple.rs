@@ -1,7 +1,4 @@
-//! This document is a minimal example
-//! It shows:
-//! - Setting up a session
-//! - Fetchign user data
+//! Minimal example: install a device, create a session, and fetch user data.
 
 use std::{env, time::Duration};
 

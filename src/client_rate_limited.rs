@@ -1,3 +1,45 @@
+//! Rate-limited wrapper around [`Client`].
+//!
+//! Bunq imposes default rate limits of **3 GET requests per second** and **1
+//! POST request per second** per device. Exceeding these limits results in a
+//! HTTP 429 response.
+//!
+//! [`ClientRateLimited`] wraps a [`Client`] with two separate
+//! [`RateLimiter`] instances — one for GET
+//! requests and one for POST/PUT requests — sourced from the
+//! [`ritlers`](https://crates.io/crates/ritlers) crate. Each method queues its
+//! request through the appropriate limiter. If Bunq responds with 429, the
+//! task is automatically re-queued as a **priority task** and retried without
+//! any extra configuration. The `on_response` callback is only called once the
+//! request succeeds.
+//!
+//! The `on_response` callback is **spawned onto a new Tokio task** so it does
+//! not hold the rate-limiter slot while the callback is running. This keeps
+//! throughput high even when callbacks perform slow operations.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use std::{sync::Arc, time::Duration};
+//! use bunqers::client_rate_limited::ClientRateLimited;
+//! use ritlers::async_rt::RateLimiter;
+//!
+//! # #[tokio::main]
+//! # async fn main() {
+//! # let client: bunqers::client::Client = todo!();
+//! let client_rl = Arc::new(ClientRateLimited {
+//!     client,
+//!     ratelimiter_get:  RateLimiter::new(3, Duration::from_secs(1)).unwrap(),
+//!     ratelimiter_post: RateLimiter::new(1, Duration::from_secs(1)).unwrap(),
+//! });
+//!
+//! client_rl.get_user_ratelimited(|response| async move {
+//!     let user = response.into_result().expect("API error");
+//!     println!("Hello, {}!", user.user_person.display_name);
+//! }).await;
+//! # }
+//! ```
+
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use ritlers::{TaskResult, async_rt::RateLimiter};
@@ -5,17 +47,47 @@ use rust_decimal::Decimal;
 
 use crate::{client::Client, messenger::ApiResponse, types::*};
 
+/// A type-erased, heap-allocated future that resolves to `()`.
+///
+/// Used internally to store callbacks without knowing their concrete type.
 pub type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+/// A type-erased callback invoked with the successful API response.
 type OnResponse<T> = Arc<dyn Fn(ApiResponse<T>) -> BoxFuture + Send + Sync>;
+
+/// A type-erased closure that, when called, produces a future that fetches
+/// data from the API. Called repeatedly on retry.
 type FetchFn<T> =
 	Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ApiResponse<T>> + Send + 'static>> + Send + Sync>;
 
+/// A [`Client`] with separate rate limiters for GET and POST/PUT requests.
+///
+/// Construct this directly and wrap it in an [`Arc`] to share across tasks:
+///
+/// ```rust,no_run
+/// # use std::{sync::Arc, time::Duration};
+/// # use bunqers::client_rate_limited::ClientRateLimited;
+/// # use ritlers::async_rt::RateLimiter;
+/// # let client: bunqers::client::Client = todo!();
+/// let client_rl = Arc::new(ClientRateLimited {
+///     client,
+///     ratelimiter_get:  RateLimiter::new(3, Duration::from_secs(1)).unwrap(),
+///     ratelimiter_post: RateLimiter::new(1, Duration::from_secs(1)).unwrap(),
+/// });
+/// ```
 pub struct ClientRateLimited {
 	pub client: Client,
+	/// Rate limiter for read (GET) requests. Bunq allows 3 per second by default.
 	pub ratelimiter_get: RateLimiter,
+	/// Rate limiter for write (POST/PUT) requests. Bunq allows 1 per second by default.
 	pub ratelimiter_post: RateLimiter,
 }
 
+/// Schedules a single API fetch through the given `ratelimiter`.
+///
+/// On a 429 response the task returns [`TaskResult::TryAgain`], which causes
+/// `ritlers` to re-queue it as a priority task. On success, `on_response` is
+/// spawned onto a new Tokio task so the rate-limiter slot is freed immediately.
 async fn schedule<T: Send + 'static>(
 	ratelimiter: &RateLimiter,
 	fetch: FetchFn<T>,
@@ -28,8 +100,13 @@ async fn schedule<T: Send + 'static>(
 			async move {
 				let response = fetch().await;
 				if response.is_rate_limited() {
+					// Tell ritlers to re-queue this task immediately as a
+					// priority task, ahead of any newly scheduled requests.
 					TaskResult::TryAgain
 				} else {
+					// Spawn the callback on a separate task so the
+					// rate-limiter slot is released right away rather than
+					// waiting for the callback to finish.
 					tokio::spawn(on_response(response));
 					TaskResult::Success
 				}
@@ -39,6 +116,10 @@ async fn schedule<T: Send + 'static>(
 }
 
 impl ClientRateLimited {
+	/// Fetches the user account associated with the current session.
+	///
+	/// `on_response` is called (on a spawned task) once Bunq returns a
+	/// successful response. 429 responses are retried automatically.
 	pub async fn get_user_ratelimited<F, Fut>(self: &Arc<Self>, on_response: F)
 	where
 		F: Fn(ApiResponse<Single<User>>) -> Fut + Send + Sync + 'static,
@@ -57,6 +138,10 @@ impl ClientRateLimited {
 		.await;
 	}
 
+	/// Fetches all monetary accounts for the session's user.
+	///
+	/// `on_response` is called (on a spawned task) once Bunq returns a
+	/// successful response. 429 responses are retried automatically.
 	pub async fn get_monetary_accounts_ratelimited<F, Fut>(self: &Arc<Self>, on_response: F)
 	where
 		F: Fn(ApiResponse<Multiple<MonetaryAccountBankWrapper>>) -> Fut + Send + Sync + 'static,
@@ -75,6 +160,10 @@ impl ClientRateLimited {
 		.await;
 	}
 
+	/// Fetches a single monetary account by ID.
+	///
+	/// `on_response` is called (on a spawned task) once Bunq returns a
+	/// successful response. 429 responses are retried automatically.
 	pub async fn get_monetary_account_ratelimited<F, Fut>(
 		self: &Arc<Self>,
 		bank_account_id: u32,
@@ -96,6 +185,10 @@ impl ClientRateLimited {
 		.await;
 	}
 
+	/// Fetches a single bunq.me payment request (BunqMeTab) by ID.
+	///
+	/// `on_response` is called (on a spawned task) once Bunq returns a
+	/// successful response. 429 responses are retried automatically.
 	pub async fn get_payment_request_ratelimited<F, Fut>(
 		self: &Arc<Self>,
 		monetary_account_id: u32,
@@ -122,6 +215,13 @@ impl ClientRateLimited {
 		.await;
 	}
 
+	/// Creates a new bunq.me payment request.
+	///
+	/// `amount` is always interpreted as EUR.
+	///
+	/// `on_response` is called (on a spawned task) once Bunq returns a
+	/// successful response. 429 responses are retried automatically, which
+	/// means `fetch` — and therefore the POST — may be called more than once.
 	pub async fn create_payment_request_ratelimited<F, Fut>(
 		self: &Arc<Self>,
 		monetary_account_id: u32,
@@ -152,6 +252,10 @@ impl ClientRateLimited {
 		.await;
 	}
 
+	/// Cancels an open bunq.me payment request.
+	///
+	/// `on_response` is called (on a spawned task) once Bunq returns a
+	/// successful response. 429 responses are retried automatically.
 	pub async fn close_payment_request_ratelimited<F, Fut>(
 		self: &Arc<Self>,
 		monetary_account_id: u32,

@@ -1,3 +1,16 @@
+//! Custom [`Deserialize`] implementations for types whose
+//! JSON shape does not map cleanly to a Rust struct.
+//!
+//! Bunq uses a fixed envelope format for all responses:
+//!
+//! ```json
+//! { "Response": [ { "TypeKey": { ...fields... } }, ... ], "Pagination": {...} }
+//! ```
+//!
+//! Standard `#[derive(Deserialize)]` cannot handle this without custom logic,
+//! so the impls in this module manually walk the JSON value tree using
+//! `serde_json::Value` and `serde_path_to_error` for precise error messages.
+
 use std::any::type_name;
 
 use chrono::NaiveDateTime;
@@ -5,6 +18,9 @@ use serde::{Deserialize, de::Error};
 
 use crate::types::*;
 
+/// Deserialises [`ApiResponseBody<T>`] by checking whether the top-level
+/// JSON object contains an `"Error"` key (API error) or a `"Response"` key
+/// (success payload).
 impl<'de, T> Deserialize<'de> for ApiResponseBody<T>
 where
 	T: Deserialize<'de>,
@@ -35,6 +51,8 @@ where
 	}
 }
 
+/// Deserialises [`Multiple<T>`] by extracting the `"Response"` array and the
+/// `"Pagination"` object from the envelope.
 impl<'de, T> Deserialize<'de> for Multiple<T>
 where
 	T: Deserialize<'de>,
@@ -45,29 +63,33 @@ where
 	{
 		let root = serde_json::Value::deserialize(deserializer).expect("Failed to parse JSON");
 
-		// Get pagination details
-		let pagination_value = root.get("Pagination").expect("Failed here");
+		let pagination_value = root
+			.get("Pagination")
+			.ok_or_else(|| D::Error::custom("Missing 'Pagination' in response"))?;
 		let pagination = Pagination::deserialize(pagination_value.clone())
-			.map_err(|e| D::Error::custom(format!("Failed: {e}")))?;
+			.map_err(|e| D::Error::custom(format!("Failed to parse Pagination: {e}")))?;
 
-		// Get data
 		let data_value = root
 			.get("Response")
-			.ok_or_else(|| D::Error::custom("Failed"))?;
+			.ok_or_else(|| D::Error::custom("Missing 'Response' in response"))?;
 		let data_value_array = data_value
 			.as_array()
-			.ok_or_else(|| D::Error::custom("Wansnt an array!"))?;
+			.ok_or_else(|| D::Error::custom("'Response' was not an array"))?;
 		let data: Vec<T> = data_value_array
 			.iter()
 			.map(|value| {
-				T::deserialize(value.clone()).map_err(|e| D::Error::custom(format!("Error: {e}")))
+				T::deserialize(value.clone()).map_err(|e| D::Error::custom(format!("{e}")))
 			})
 			.collect::<Result<Vec<T>, D::Error>>()?;
 
-		return Ok(Self { data, pagination });
+		Ok(Self { data, pagination })
 	}
 }
 
+/// Deserialises [`Single<T>`] by extracting the one-element `"Response"` array
+/// from the envelope.
+///
+/// Returns an error if the `Response` array contains more than one element.
 impl<'de, T> Deserialize<'de> for Single<T>
 where
 	T: Deserialize<'de>,
@@ -78,10 +100,9 @@ where
 	{
 		let root = serde_json::Value::deserialize(deserializer).expect("Failed to parse to JSON");
 
-		// Expect Response, but no Pagination!
 		let response_field = root
 			.get("Response")
-			.expect("No 'Response' field available")
+			.ok_or_else(|| D::Error::custom("Missing 'Response' field in single-item response"))?
 			.clone();
 
 		let response: Result<Vec<T>, _> = serde_path_to_error::deserialize(response_field);
@@ -95,23 +116,30 @@ where
 					parse_error.path(),
 					parse_error
 				);
-				return Err(D::Error::custom("Some error happened. Look above"));
+				return Err(D::Error::custom(format!(
+					"Failed to parse single response item: {parse_error}"
+				)));
 			}
 		};
 
 		if response.len() > 1 {
-			return Err(D::Error::custom(format!("Received more than a single!")));
+			return Err(D::Error::custom(format!(
+				"Expected a single-item response but received {} elements",
+				response.len()
+			)));
 		}
 
 		let single_data = response
 			.into_iter()
 			.next()
-			.expect("No single data was available");
+			.ok_or_else(|| D::Error::custom("'Response' array was empty"))?;
 
 		Ok(Self(single_data))
 	}
 }
 
+/// Deserialises [`Installation`] by manually walking its heterogeneous
+/// `Response` array: `[{Id}, {Token}, {ServerPublicKey}]`.
 impl<'de> Deserialize<'de> for Installation {
 	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
 	where
@@ -119,15 +147,15 @@ impl<'de> Deserialize<'de> for Installation {
 	{
 		let root = serde_json::Value::deserialize(deserializer).expect("Failed to parse to JSON");
 
-		let binding = root
+		let response_field = root
 			.get("Response")
 			.expect("No 'Response' field in Installation")
 			.clone();
-		let response_field = binding
+		let response_elements = response_field
 			.as_array()
 			.expect("'Response' field was not an array");
 
-		let mut response_iter = response_field.iter();
+		let mut response_iter = response_elements.iter();
 
 		let id: BunqId = match serde_path_to_error::deserialize(
 			response_iter
@@ -139,13 +167,13 @@ impl<'de> Deserialize<'de> for Installation {
 			Ok(id) => id,
 			Err(er) => {
 				println!("Failed to parse: {er}");
-				return Err(D::Error::custom("Failed to parse Installation"));
+				return Err(D::Error::custom("Failed to parse Installation Id"));
 			}
 		};
 
 		let token_value = response_iter
 			.next()
-			.expect("Not enough elements in installation response 2")
+			.expect("Not enough elements in installation response")
 			.get("Token")
 			.expect("No 'Token' object in Installation response");
 
@@ -153,19 +181,19 @@ impl<'de> Deserialize<'de> for Installation {
 			Ok(token) => token,
 			Err(e) => {
 				println!("Failed to parse: {e}");
-				return Err(D::Error::custom("Failed to parse Installation"));
+				return Err(D::Error::custom("Failed to parse Installation Token"));
 			}
 		};
 
 		let bunq_public_key = response_iter
 			.next()
-			.expect("Not enough elements in installation response 3")
+			.expect("Not enough elements in installation response")
 			.get("ServerPublicKey")
-			.expect("No 'ServerPublicKey' in Response elements of Installation")
+			.expect("No 'ServerPublicKey' in Installation response")
 			.get("server_public_key")
-			.expect("No actual key")
+			.expect("No 'server_public_key' inside ServerPublicKey")
 			.as_str()
-			.expect("Failed to parse this to string")
+			.expect("'server_public_key' was not a string")
 			.to_string();
 
 		Ok(Self {
@@ -176,60 +204,64 @@ impl<'de> Deserialize<'de> for Installation {
 	}
 }
 
+/// Deserialises [`DeviceServerSmall`] from the `{"Id": {"id": N}}` shape
+/// returned by `POST /device-server`.
 impl<'de> Deserialize<'de> for DeviceServerSmall {
 	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
 	where
 		D: serde::Deserializer<'de>,
 	{
 		let root = serde_json::Value::deserialize(deserializer)
-			.map_err(|e| D::Error::custom(format!("Failed: {e}")))?;
+			.map_err(|e| D::Error::custom(format!("Failed to parse DeviceServerSmall: {e}")))?;
 
 		let id = root
 			.get("Id")
-			.ok_or_else(|| D::Error::custom("No 'Id' available in DeviceServerSmall"))?
+			.ok_or_else(|| D::Error::custom("No 'Id' in DeviceServerSmall response"))?
 			.get("id")
-			.ok_or_else(|| D::Error::custom("No 'id' in Id of DeviceServerSmall"))?
+			.ok_or_else(|| D::Error::custom("No 'id' inside 'Id' in DeviceServerSmall"))?
 			.as_u64()
-			.ok_or_else(|| D::Error::custom("Invalid type of 'id' in DeviceServerSmall"))?
+			.ok_or_else(|| D::Error::custom("'id' in DeviceServerSmall was not an integer"))?
 			as u32;
 
-		Ok(DeviceServerSmall { id: id })
+		Ok(DeviceServerSmall { id })
 	}
 }
 
+/// Deserialises [`Session`] by manually walking its heterogeneous `Response`
+/// array: `[{Id}, {Token}, {UserPerson}]`.
 impl<'de> Deserialize<'de> for Session {
 	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
 	where
 		D: serde::Deserializer<'de>,
 	{
 		let root = serde_json::Value::deserialize(deserializer)
-			.map_err(|e| D::Error::custom(format!("Failed: {e}")))?;
+			.map_err(|e| D::Error::custom(format!("Failed to parse Session: {e}")))?;
 
 		let response_elements = root
 			.get("Response")
 			.ok_or_else(|| D::Error::custom("No 'Response' in Session response"))?
 			.as_array()
-			.ok_or_else(|| D::Error::custom("Response field in Session was not an array"))?;
-		let mut response_iter = response_elements.into_iter();
+			.ok_or_else(|| D::Error::custom("'Response' in Session was not an array"))?;
+		let mut response_iter = response_elements.iter();
 
 		let id = response_iter
 			.next()
-			.ok_or_else(|| D::Error::custom("Not enough elements in Session for Id"))?
+			.ok_or_else(|| D::Error::custom("Not enough elements in Session for 'Id'"))?
 			.get("Id")
 			.ok_or_else(|| D::Error::custom("First element in Session did not have 'Id'"))?
 			.get("id")
-			.ok_or_else(|| D::Error::custom("Id in session did not have 'id'"))?
+			.ok_or_else(|| D::Error::custom("'Id' in Session did not have 'id'"))?
 			.as_u64()
-			.ok_or_else(|| D::Error::custom("'id' in Id in Session was invalid type"))?
+			.ok_or_else(|| D::Error::custom("'id' in Session was not an integer"))?
 			as u32;
 
 		let token = serde_path_to_error::deserialize(
 			response_iter
 				.next()
-				.ok_or_else(|| D::Error::custom("Not enough elements for 'Token' in Session"))?
+				.ok_or_else(|| D::Error::custom("Not enough elements in Session for 'Token'"))?
 				.get("Token")
 				.ok_or_else(|| {
-					D::Error::custom("'Token' was not second element in Session response")
+					D::Error::custom("Second element in Session did not have 'Token'")
 				})?,
 		)
 		.map_err(|e| D::Error::custom(format!("Failed to parse Token in Session: {e}")))?;
@@ -237,7 +269,9 @@ impl<'de> Deserialize<'de> for Session {
 		let user_person = serde_path_to_error::deserialize(
 			response_iter
 				.next()
-				.ok_or_else(|| D::Error::custom("Not enough elements in Session for UserPerson"))?
+				.ok_or_else(|| {
+					D::Error::custom("Not enough elements in Session for 'UserPerson'")
+				})?
 				.get("UserPerson")
 				.ok_or_else(|| {
 					D::Error::custom("Third element in Session did not have 'UserPerson'")
@@ -253,12 +287,13 @@ impl<'de> Deserialize<'de> for Session {
 	}
 }
 
-/// Parse the string into a NaiveDateTime
+/// Parses a Bunq date-time string (`"YYYY-MM-DD HH:MM:SS.f"`) into a
+/// [`NaiveDateTime`].
 pub fn deserialize_date<'de, D>(deserializer: D) -> Result<NaiveDateTime, D::Error>
 where
 	D: serde::Deserializer<'de>,
 {
 	let s = String::deserialize(deserializer)?;
 	NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S%.f")
-		.map_err(|e| D::Error::custom(format!("Incorrect datetime {s}: {}", e.to_string())))
+		.map_err(|e| D::Error::custom(format!("Invalid date-time '{}': {}", s, e)))
 }

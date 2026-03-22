@@ -3,6 +3,11 @@ name = "bunqers"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+description = "A Rust client library for the Bunq API with typed endpoints, request signing, and optional rate limiting"
+repository = "https://github.com/Florisheinen1/bunqers"
+keywords = ["bunq", "banking", "api", "client"]
+categories = ["api-bindings"]
+readme = "README.md"
 
 [features]
 ratelimited = ["dep:ritlers", "dep:tokio"]

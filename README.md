@@ -1,55 +1,115 @@
 # bunqers
 
-Convenience Client for using Bunq API in Rust.
+A Rust client library for the [Bunq API](https://doc.bunq.com/).
 
-## Goals
+## Features
 
-- Explicit API datatypes and endpoints
-- Reusable session data
-- Verifying response signatures
+- Typed request and response bodies for all covered endpoints
+- RSA request signing and response signature verification
+- Typestate builder that enforces the correct setup order at compile time
+- Serialisable `InstallationContext` so device registration survives process restarts
+- Optional rate-limited client wrapper (`ratelimited` feature)
 
-### Non-goals
+## Quick start
 
-- Rate limiting
+Add the dependency:
 
-## Usage
-
-```rust
-let bunq_api_key = "your-api-key".into();
-let api_base_url = "https://api.bunq.com/v1".into();
-
-let client = ClientBuilder::new_without_key(api_base_url, "example-app-name".into())?
-	.install_device()
-	.await?
-	.register_device(bunq_api_key, "my-test-device")
-	.await?
-	.create_session()
-	.await?
-	.build();
-
-// Use the client object for fetching data from the API
-let name = client.get_user().await.into_result()?.user_person.display_name;
-println!("Hello, {name}!");
+```toml
+[dependencies]
+bunqers = "0.1"
 ```
 
-## Endpoints covered
+If you also want the rate-limited client:
 
-The following endpoints have datatype definitions and corresponding method:
+```toml
+[dependencies]
+bunqers = { version = "0.1", features = ["ratelimited"] }
+```
+
+### First run — install and register the device
+
+Device registration generates an RSA key pair and calls three Bunq endpoints.
+Persist the returned `InstallationContext` (e.g. as JSON) so you can skip this
+step on subsequent runs.
+
+```rust
+use bunqers::InstallationContext;
+
+let installation: InstallationContext = bunqers::install_device(
+    "your-api-key".into(),
+    "https://api.bunq.com/v1".into(),
+    "my-app".into(),
+    "my-device".into(),
+).await;
+
+// Serialise and save `installation` to disk here.
+```
+
+### Subsequent runs — create a client from saved context
+
+```rust
+// Load `installation` from disk here.
+let client = bunqers::create_client(installation, None).await;
+
+let user = client.get_user().await.into_result()?;
+println!("Hello, {}!", user.user_person.display_name);
+```
+
+Pass a cached session token as the second argument to `create_client` to avoid
+creating a new session on every startup. The session is validated automatically
+and a new one is created if it has expired.
+
+### Rate-limited client
+
+Bunq enforces rate limits (3 GET / 1 POST per second by default). The optional
+`ratelimited` feature provides `ClientRateLimited`, which queues requests
+through [`ritlers`](https://crates.io/crates/ritlers) and automatically retries
+on a 429 response.
+
+```rust
+use std::{sync::Arc, time::Duration};
+use bunqers::client_rate_limited::ClientRateLimited;
+use ritlers::async_rt::RateLimiter;
+
+let client_rl = Arc::new(ClientRateLimited {
+    client,
+    ratelimiter_get:  RateLimiter::new(3, Duration::from_secs(1)).unwrap(),
+    ratelimiter_post: RateLimiter::new(1, Duration::from_secs(1)).unwrap(),
+});
+
+client_rl.get_user_ratelimited(|response| async move {
+    let user = response.into_result().expect("API error");
+    println!("Hello, {}!", user.user_person.display_name);
+}).await;
+```
+
+The `on_response` callback is only called on a successful (non-429) response.
+On a 429 the task is automatically re-queued as a priority task — no extra
+callback or retry flag needed.
+
+## Covered endpoints
+
 | Endpoint | Implemented |
 |:----------------------------------------|:-----------:|
 | /installation | ✅ |
 | /device-server | ✅ |
 | /session-server | ✅ |
 | /user | ✅ |
-| /user/{}/monetary-account-bank | ✅ |
-| /user/{}/monetary-account/{}/bunqme-tab | ✅ |
+| /user/{id}/monetary-account-bank | ✅ |
+| /user/{id}/monetary-account/{id}/bunqme-tab | ✅ |
 
-More will be added on demand
+More endpoints will be added on demand.
+
+## System requirements
+
+`bunqers` links against OpenSSL for RSA key generation and SHA-256 signing.
+Make sure the OpenSSL development headers are installed on your system (e.g.
+`libssl-dev` on Debian/Ubuntu or `openssl` via Homebrew on macOS).
 
 ## License
 
-Licensed under MIT
+Licensed under MIT.
 
-## Contribution
+## Contributions
 
-Contributions are welcome. Feel free to create an Issue or open a PR!
+Contributions are welcome — feel free to open an issue or a pull request!
