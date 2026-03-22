@@ -26,6 +26,8 @@ async fn main() {
 		client,
 		ratelimiter_get: RateLimiter::new(3, Duration::from_secs(1)).unwrap(),
 		ratelimiter_post: RateLimiter::new(1, Duration::from_secs(1)).unwrap(),
+		ratelimiter_put: RateLimiter::new(1, Duration::from_secs(1)).unwrap(),
+		max_retries: 0,
 	});
 
 	// Schedule a rate-limited user fetch.

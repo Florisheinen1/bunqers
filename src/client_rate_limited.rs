@@ -40,7 +40,12 @@
 //! # }
 //! ```
 
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+	future::Future,
+	pin::Pin,
+	sync::{Arc, atomic::AtomicU32},
+	time::Duration,
+};
 
 use ritlers::{TaskResult, async_rt::RateLimiter};
 use rust_decimal::Decimal;
@@ -83,6 +88,8 @@ pub struct ClientRateLimited {
 	pub ratelimiter_post: RateLimiter,
 	/// Rate limiter for write (PUT) requests.
 	pub ratelimiter_put: RateLimiter,
+	/// The maximum amount of retries a single task can have
+	pub max_retries: u32,
 }
 
 /// Schedules a single API fetch through the given `ratelimiter`.
@@ -94,27 +101,34 @@ async fn schedule<T: Send + 'static>(
 	ratelimiter: &RateLimiter,
 	fetch: FetchFn<T>,
 	on_response: OnResponse<T>,
-) {
+	max_retries: u32,
+) -> Duration {
+	let retries = Arc::new(AtomicU32::new(0));
+
 	ratelimiter
 		.schedule_task_with_retry(move || {
 			let fetch = Arc::clone(&fetch);
 			let on_response = Arc::clone(&on_response);
+			let retries = retries.clone();
 			async move {
 				let response = fetch().await;
 				if response.is_rate_limited() {
-					// Tell ritlers to re-queue this task immediately as a
-					// priority task, ahead of any newly scheduled requests.
-					TaskResult::TryAgain
+					let prev = retries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+					if prev < max_retries {
+						TaskResult::TryAgain
+					} else {
+						TaskResult::Done
+					}
 				} else {
 					// Spawn the callback on a separate task so the
 					// rate-limiter slot is released right away rather than
 					// waiting for the callback to finish.
 					tokio::spawn(on_response(response));
-					TaskResult::Success
+					TaskResult::Done
 				}
 			}
 		})
-		.await;
+		.await
 }
 
 impl ClientRateLimited {
@@ -122,7 +136,7 @@ impl ClientRateLimited {
 	///
 	/// `on_response` is called (on a spawned task) once Bunq returns a
 	/// successful response. 429 responses are retried automatically.
-	pub async fn get_user_ratelimited<F, Fut>(self: &Arc<Self>, on_response: F)
+	pub async fn get_user_ratelimited<F, Fut>(self: &Arc<Self>, on_response: F) -> Duration
 	where
 		F: Fn(ApiResponse<Single<User>>) -> Fut + Send + Sync + 'static,
 		Fut: Future<Output = ()> + Send + 'static,
@@ -136,15 +150,19 @@ impl ClientRateLimited {
 			&self.ratelimiter_get,
 			fetch,
 			Arc::new(move |r| Box::pin(on_response(r))),
+			self.max_retries,
 		)
-		.await;
+		.await
 	}
 
 	/// Fetches all monetary accounts for the session's user.
 	///
 	/// `on_response` is called (on a spawned task) once Bunq returns a
 	/// successful response. 429 responses are retried automatically.
-	pub async fn get_monetary_accounts_ratelimited<F, Fut>(self: &Arc<Self>, on_response: F)
+	pub async fn get_monetary_accounts_ratelimited<F, Fut>(
+		self: &Arc<Self>,
+		on_response: F,
+	) -> Duration
 	where
 		F: Fn(ApiResponse<Multiple<MonetaryAccountBankWrapper>>) -> Fut + Send + Sync + 'static,
 		Fut: Future<Output = ()> + Send + 'static,
@@ -158,8 +176,9 @@ impl ClientRateLimited {
 			&self.ratelimiter_get,
 			fetch,
 			Arc::new(move |r| Box::pin(on_response(r))),
+			self.max_retries,
 		)
-		.await;
+		.await
 	}
 
 	/// Fetches a single monetary account by ID.
@@ -170,7 +189,8 @@ impl ClientRateLimited {
 		self: &Arc<Self>,
 		bank_account_id: u32,
 		on_response: F,
-	) where
+	) -> Duration
+	where
 		F: Fn(ApiResponse<Single<MonetaryAccountBankWrapper>>) -> Fut + Send + Sync + 'static,
 		Fut: Future<Output = ()> + Send + 'static,
 	{
@@ -183,8 +203,9 @@ impl ClientRateLimited {
 			&self.ratelimiter_get,
 			fetch,
 			Arc::new(move |r| Box::pin(on_response(r))),
+			self.max_retries,
 		)
-		.await;
+		.await
 	}
 
 	/// Fetches a single bunq.me payment request (BunqMeTab) by ID.
@@ -196,7 +217,8 @@ impl ClientRateLimited {
 		monetary_account_id: u32,
 		payment_request_id: u32,
 		on_response: F,
-	) where
+	) -> Duration
+	where
 		F: Fn(ApiResponse<Single<BunqMeTabWrapper>>) -> Fut + Send + Sync + 'static,
 		Fut: Future<Output = ()> + Send + 'static,
 	{
@@ -213,8 +235,9 @@ impl ClientRateLimited {
 			&self.ratelimiter_get,
 			fetch,
 			Arc::new(move |r| Box::pin(on_response(r))),
+			self.max_retries,
 		)
-		.await;
+		.await
 	}
 
 	/// Creates a new bunq.me payment request.
@@ -231,7 +254,8 @@ impl ClientRateLimited {
 		description: String,
 		redirect_url: String,
 		on_response: F,
-	) where
+	) -> Duration
+	where
 		F: Fn(ApiResponse<Single<CreateBunqMeTabResponseWrapper>>) -> Fut + Send + Sync + 'static,
 		Fut: Future<Output = ()> + Send + 'static,
 	{
@@ -250,8 +274,9 @@ impl ClientRateLimited {
 			&self.ratelimiter_post,
 			fetch,
 			Arc::new(move |r| Box::pin(on_response(r))),
+			self.max_retries,
 		)
-		.await;
+		.await
 	}
 
 	/// Cancels an open bunq.me payment request.
@@ -263,7 +288,8 @@ impl ClientRateLimited {
 		monetary_account_id: u32,
 		payment_request_id: u32,
 		on_response: F,
-	) where
+	) -> Duration
+	where
 		F: Fn(ApiResponse<Single<CreateBunqMeTabResponseWrapper>>) -> Fut + Send + Sync + 'static,
 		Fut: Future<Output = ()> + Send + 'static,
 	{
@@ -280,7 +306,8 @@ impl ClientRateLimited {
 			&self.ratelimiter_put,
 			fetch,
 			Arc::new(move |r| Box::pin(on_response(r))),
+			self.max_retries,
 		)
-		.await;
+		.await
 	}
 }

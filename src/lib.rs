@@ -71,17 +71,22 @@
 //! |---------|-------------|
 //! | `ratelimited` | Enables [`create_rate_limited_client`] and [`client_rate_limited::ClientRateLimited`], which queue requests through [`ritlers`](https://crates.io/crates/ritlers) and auto-retry on 429 responses |
 
-use std::time::Duration;
-
 use openssl::pkey::PKey;
-use ritlers::async_rt::RateLimiter;
 use serde::{Deserialize, Serialize};
 
 use crate::{
 	client::Client,
 	client_builder::{ClientBuilder, Registered, UncheckedSession},
-	client_rate_limited::ClientRateLimited,
 };
+
+#[cfg(feature = "ratelimited")]
+use std::time::Duration;
+
+#[cfg(feature = "ratelimited")]
+use ritlers::async_rt::RateLimiter;
+
+#[cfg(feature = "ratelimited")]
+use crate::client_rate_limited::ClientRateLimited;
 
 pub mod client;
 pub mod client_builder;
@@ -89,7 +94,7 @@ pub mod deserialization;
 pub mod messenger;
 pub mod types;
 
-// #[cfg(feature = "ratelimited")]
+#[cfg(feature = "ratelimited")]
 pub mod client_rate_limited;
 
 /// All credentials needed to authenticate with the Bunq API.
@@ -299,6 +304,7 @@ pub async fn create_client(
 pub async fn create_rate_limited_client(
 	installation_context: InstallationContext,
 	session_token: Option<String>,
+	max_retries: u32,
 ) -> ClientRateLimited {
 	let client = create_client(installation_context, session_token).await;
 	ClientRateLimited {
@@ -309,5 +315,6 @@ pub async fn create_rate_limited_client(
 			.expect("Failed to create POST rate limiter"),
 		ratelimiter_put: RateLimiter::new(2, Duration::from_secs(3))
 			.expect("Failed to create PUT rate limiter"),
+		max_retries,
 	}
 }
