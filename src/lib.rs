@@ -44,18 +44,43 @@
 //! reuse an existing session. The token is validated; a new session is created
 //! automatically if it has expired.
 //!
+//! ## Rate-limited client (`ratelimited` feature)
+//!
+//! Enable the `ratelimited` feature to get [`create_rate_limited_client`],
+//! which wraps the client with pre-configured rate limiters so you don't need
+//! to depend on `ritlers` directly:
+//!
+//! ```rust,no_run
+//! use std::sync::Arc;
+//!
+//! # #[tokio::main]
+//! # async fn main() {
+//! # let installation: bunqers::InstallationContext = todo!();
+//! let client_rl = Arc::new(bunqers::create_rate_limited_client(installation, None).await);
+//!
+//! client_rl.get_user_ratelimited(|response| async move {
+//!     let user = response.into_result().expect("API error");
+//!     println!("Hello, {}!", user.user_person.display_name);
+//! }).await;
+//! # }
+//! ```
+//!
 //! # Feature flags
 //!
 //! | Feature | Description |
 //! |---------|-------------|
-//! | `ratelimited` | Enables [`client_rate_limited::ClientRateLimited`], a wrapper that queues requests through [`ritlers`](https://crates.io/crates/ritlers) and auto-retries on 429 responses |
+//! | `ratelimited` | Enables [`create_rate_limited_client`] and [`client_rate_limited::ClientRateLimited`], which queue requests through [`ritlers`](https://crates.io/crates/ritlers) and auto-retry on 429 responses |
+
+use std::time::Duration;
 
 use openssl::pkey::PKey;
+use ritlers::async_rt::RateLimiter;
 use serde::{Deserialize, Serialize};
 
 use crate::{
 	client::Client,
 	client_builder::{ClientBuilder, Registered, UncheckedSession},
+	client_rate_limited::ClientRateLimited,
 };
 
 pub mod client;
@@ -64,7 +89,7 @@ pub mod deserialization;
 pub mod messenger;
 pub mod types;
 
-#[cfg(feature = "ratelimited")]
+// #[cfg(feature = "ratelimited")]
 pub mod client_rate_limited;
 
 /// All credentials needed to authenticate with the Bunq API.
@@ -229,4 +254,60 @@ pub async fn create_client(
 	.await
 	.expect("Failed to create session. Is the installation invalidated?")
 	.build()
+}
+
+/// Creates a [`ClientRateLimited`] from a previously obtained [`InstallationContext`].
+///
+/// This is the recommended entry point when you want automatic rate limiting.
+/// It behaves identically to [`create_client`] for session handling, then wraps
+/// the resulting client with pre-configured rate limiters so callers do not need
+/// to depend on `ritlers` directly.
+///
+/// The default limits match Bunq's documented per-device quotas:
+/// - **GET**: 3 requests per 3 seconds
+/// - **POST**: 5 requests per 3 seconds
+///
+/// 429 responses are retried automatically by the returned client — no extra
+/// configuration is required.
+///
+/// If `session_token` is `Some`, that token is validated and reused if still
+/// valid. If it has expired, or if `session_token` is `None`, a new session is
+/// created.
+///
+/// # Panics
+///
+/// Panics if session creation fails or if the rate limiters cannot be
+/// initialised (neither should happen under normal conditions).
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use std::sync::Arc;
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// # let installation: bunqers::InstallationContext = todo!();
+/// let client_rl = Arc::new(bunqers::create_rate_limited_client(installation, None).await);
+///
+/// client_rl.get_user_ratelimited(|response| async move {
+///     let user = response.into_result().expect("API error");
+///     println!("Hello, {}!", user.user_person.display_name);
+/// }).await;
+/// # }
+/// ```
+#[cfg(feature = "ratelimited")]
+pub async fn create_rate_limited_client(
+	installation_context: InstallationContext,
+	session_token: Option<String>,
+) -> ClientRateLimited {
+	let client = create_client(installation_context, session_token).await;
+	ClientRateLimited {
+		client,
+		ratelimiter_get: RateLimiter::new(3, Duration::from_secs(3))
+			.expect("Failed to create GET rate limiter"),
+		ratelimiter_post: RateLimiter::new(5, Duration::from_secs(3))
+			.expect("Failed to create POST rate limiter"),
+		ratelimiter_put: RateLimiter::new(2, Duration::from_secs(3))
+			.expect("Failed to create PUT rate limiter"),
+	}
 }

@@ -40,7 +40,7 @@
 //! # }
 //! ```
 
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use ritlers::{TaskResult, async_rt::RateLimiter};
 use rust_decimal::Decimal;
@@ -77,10 +77,12 @@ type FetchFn<T> =
 /// ```
 pub struct ClientRateLimited {
 	pub client: Client,
-	/// Rate limiter for read (GET) requests. Bunq allows 3 per second by default.
+	/// Rate limiter for read (GET) requests.
 	pub ratelimiter_get: RateLimiter,
-	/// Rate limiter for write (POST/PUT) requests. Bunq allows 1 per second by default.
+	/// Rate limiter for write (POST) requests.
 	pub ratelimiter_post: RateLimiter,
+	/// Rate limiter for write (PUT) requests.
+	pub ratelimiter_put: RateLimiter,
 }
 
 /// Schedules a single API fetch through the given `ratelimiter`.
@@ -275,7 +277,7 @@ impl ClientRateLimited {
 			})
 		});
 		schedule(
-			&self.ratelimiter_post,
+			&self.ratelimiter_put,
 			fetch,
 			Arc::new(move |r| Box::pin(on_response(r))),
 		)

@@ -61,21 +61,16 @@ and a new one is created if it has expired.
 
 ### Rate-limited client
 
-Bunq enforces rate limits (3 GET / 1 POST per second by default). The optional
-`ratelimited` feature provides `ClientRateLimited`, which queues requests
-through [`ritlers`](https://crates.io/crates/ritlers) and automatically retries
-on a 429 response.
+Bunq enforces rate limits per device. The optional `ratelimited` feature
+provides `ClientRateLimited`, which queues requests and automatically retries
+on a 429 response. Use `create_rate_limited_client` to get one without having
+to configure rate limiters yourself:
 
 ```rust
-use std::{sync::Arc, time::Duration};
-use bunqers::client_rate_limited::ClientRateLimited;
-use ritlers::async_rt::RateLimiter;
+use std::sync::Arc;
 
-let client_rl = Arc::new(ClientRateLimited {
-    client,
-    ratelimiter_get:  RateLimiter::new(3, Duration::from_secs(1)).unwrap(),
-    ratelimiter_post: RateLimiter::new(1, Duration::from_secs(1)).unwrap(),
-});
+// Load `installation` from disk here.
+let client_rl = Arc::new(bunqers::create_rate_limited_client(installation, None).await);
 
 client_rl.get_user_ratelimited(|response| async move {
     let user = response.into_result().expect("API error");
