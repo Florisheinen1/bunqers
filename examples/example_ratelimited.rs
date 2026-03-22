@@ -29,35 +29,26 @@ async fn main() {
 	});
 
 	// Schedule a rate-limited user fetch.
-	// on_response is only called when the request succeeds (not a 429).
-	// on_rate_limit is called when the API responds with 429.
-	// retry_on_limit=true reschedules the same request through the rate limiter automatically.
+	// on_response is called when the request succeeds (not a 429).
+	// On a 429, the task is automatically re-queued as a priority task by ritlers.
 	client_rl
-		.get_user_ratelimited(
-			|response| async move {
-				let user = response.into_result().expect("API returned an error");
-				println!("Hello, {}!", user.user_person.display_name);
-			},
-			|| async { println!("Rate limited on get_user, will retry...") },
-			true,
-		)
+		.get_user_ratelimited(|response| async move {
+			let user = response.into_result().expect("API returned an error");
+			println!("Hello, {}!", user.user_person.display_name);
+		})
 		.await;
 
 	// Fetch monetary accounts — callbacks follow the same pattern.
 	client_rl
-		.get_monetary_accounts_ratelimited(
-			|response| async move {
-				let accounts = response.into_result().expect("API returned an error");
-				for account in &accounts.data {
-					println!(
-						"Account {}: {} {}",
-						account.id, account.balance.value, account.balance.currency
-					);
-				}
-			},
-			|| async { println!("Rate limited on get_monetary_accounts, will retry...") },
-			true,
-		)
+		.get_monetary_accounts_ratelimited(|response| async move {
+			let accounts = response.into_result().expect("API returned an error");
+			for account in &accounts.data {
+				println!(
+					"Account {}: {} {}",
+					account.id, account.balance.value, account.balance.currency
+				);
+			}
+		})
 		.await;
 
 	// Create a payment request — uses ratelimiter_post.
@@ -71,8 +62,6 @@ async fn main() {
 				let created = response.into_result().expect("API returned an error");
 				println!("Created payment request with id: {}", created.id.id);
 			},
-			|| async { println!("Rate limited on create_payment_request, will retry...") },
-			true,
 		)
 		.await;
 }

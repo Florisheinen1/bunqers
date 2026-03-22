@@ -1,0 +1,3 @@
+[submodule "ritlers"]
+	path = ritlers
+	url = git@github.com:Florisheinen1/ritlers.git
