@@ -12,6 +12,9 @@ pub mod deserialization;
 pub mod messenger;
 pub mod types;
 
+#[cfg(feature = "ratelimited")]
+pub mod client_rate_limited;
+
 /// Serializable installation context
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct InstallationContext {

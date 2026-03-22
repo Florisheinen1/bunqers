@@ -2,7 +2,8 @@
 
 use std::{env, sync::Arc, time::Duration};
 
-use bunqers::client::{Client, ClientRateLimited};
+use bunqers::client::Client;
+use bunqers::client_rate_limited::ClientRateLimited;
 use ritlers::async_rt::RateLimiter;
 
 #[tokio::main]
