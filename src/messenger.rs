@@ -23,6 +23,10 @@ pub struct ApiResponse<T> {
 }
 
 impl<T> ApiResponse<T> {
+	pub fn is_rate_limited(&self) -> bool {
+		self.status_code == StatusCode::TOO_MANY_REQUESTS
+	}
+
 	pub fn into_result(self) -> Result<T, ApiErrorResponse> {
 		match self.body {
 			ApiResponseBody::Ok(body) => Ok(body),
