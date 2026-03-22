@@ -72,15 +72,16 @@ use std::sync::Arc;
 // Load `installation` from disk here.
 let client_rl = Arc::new(bunqers::create_rate_limited_client(installation, None).await);
 
-client_rl.get_user_ratelimited(|response| async move {
+client_rl.get_user_ratelimited(|result| async move {
+    let response = result.expect("rate limit exhausted");
     let user = response.into_result().expect("API error");
     println!("Hello, {}!", user.user_person.display_name);
 }).await;
 ```
 
-The `on_response` callback is only called on a successful (non-429) response.
-On a 429 the task is automatically re-queued as a priority task — no extra
-callback or retry flag needed.
+The callback receives `Ok(response)` on success or `Err(RateLimitExhausted)`
+if all retries are used up. On a 429 the task is automatically re-queued as a
+priority task — no extra callback or retry flag needed.
 
 ## Covered endpoints
 

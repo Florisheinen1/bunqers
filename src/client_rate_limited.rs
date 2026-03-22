@@ -17,6 +17,10 @@
 //! not hold the rate-limiter slot while the callback is running. This keeps
 //! throughput high even when callbacks perform slow operations.
 //!
+//! If the request exhausts all retries without ever getting a non-429 response,
+//! the callback is still invoked — with `Err(`[`RateLimitExhausted`]`)` — so
+//! the caller can react rather than silently dropping the task.
+//!
 //! # Example
 //!
 //! ```rust,no_run
@@ -33,7 +37,8 @@
 //!     ratelimiter_post: RateLimiter::new(1, Duration::from_secs(1)).unwrap(),
 //! });
 //!
-//! client_rl.get_user_ratelimited(|response| async move {
+//! client_rl.get_user_ratelimited(|result| async move {
+//!     let response = result.expect("rate limit exhausted");
 //!     let user = response.into_result().expect("API error");
 //!     println!("Hello, {}!", user.user_person.display_name);
 //! }).await;
@@ -57,8 +62,17 @@ use crate::{client::Client, messenger::ApiResponse, types::*};
 /// Used internally to store callbacks without knowing their concrete type.
 pub type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
-/// A type-erased callback invoked with the successful API response.
-type OnResponse<T> = Arc<dyn Fn(ApiResponse<T>) -> BoxFuture + Send + Sync>;
+/// Error returned to the `on_response` callback when all retries are exhausted
+/// and Bunq still replies with a rate-limit error.
+#[derive(Debug)]
+pub struct RateLimitExhausted {
+	/// Number of retries that were attempted before giving up.
+	pub retries: u32,
+}
+
+/// A type-erased callback invoked with the API response result.
+/// Receives `Err(RateLimitExhausted)` if all retries were exhausted.
+type OnResponse<T> = Arc<dyn Fn(Result<ApiResponse<T>, RateLimitExhausted>) -> BoxFuture + Send + Sync>;
 
 /// A type-erased closure that, when called, produces a future that fetches
 /// data from the API. Called repeatedly on retry.
@@ -95,8 +109,10 @@ pub struct ClientRateLimited {
 /// Schedules a single API fetch through the given `ratelimiter`.
 ///
 /// On a 429 response the task returns [`TaskResult::TryAgain`], which causes
-/// `ritlers` to re-queue it as a priority task. On success, `on_response` is
-/// spawned onto a new Tokio task so the rate-limiter slot is freed immediately.
+/// `ritlers` to re-queue it as a priority task. `on_response` is spawned onto
+/// a new Tokio task so the rate-limiter slot is freed immediately — either with
+/// `Ok(response)` on success or `Err(`[`RateLimitExhausted`]`)` once all
+/// retries are used up.
 async fn schedule<T: Send + 'static>(
 	ratelimiter: &RateLimiter,
 	fetch: FetchFn<T>,
@@ -117,13 +133,17 @@ async fn schedule<T: Send + 'static>(
 					if prev < max_retries {
 						TaskResult::TryAgain
 					} else {
+						// Spawn the callback on a separate task so the
+						// rate-limiter slot is released right away rather than
+						// waiting for the callback to finish.
+						tokio::spawn(on_response(Err(RateLimitExhausted { retries: max_retries })));
 						TaskResult::Done
 					}
 				} else {
 					// Spawn the callback on a separate task so the
 					// rate-limiter slot is released right away rather than
 					// waiting for the callback to finish.
-					tokio::spawn(on_response(response));
+					tokio::spawn(on_response(Ok(response)));
 					TaskResult::Done
 				}
 			}
@@ -134,11 +154,11 @@ async fn schedule<T: Send + 'static>(
 impl ClientRateLimited {
 	/// Fetches the user account associated with the current session.
 	///
-	/// `on_response` is called (on a spawned task) once Bunq returns a
-	/// successful response. 429 responses are retried automatically.
+	/// `on_response` is called (on a spawned task) with `Ok(response)` on
+	/// success or `Err(`[`RateLimitExhausted`]`)` if all retries are used up.
 	pub async fn get_user_ratelimited<F, Fut>(self: &Arc<Self>, on_response: F) -> Duration
 	where
-		F: Fn(ApiResponse<Single<User>>) -> Fut + Send + Sync + 'static,
+		F: Fn(Result<ApiResponse<Single<User>>, RateLimitExhausted>) -> Fut + Send + Sync + 'static,
 		Fut: Future<Output = ()> + Send + 'static,
 	{
 		let c = Arc::clone(self);
@@ -157,14 +177,14 @@ impl ClientRateLimited {
 
 	/// Fetches all monetary accounts for the session's user.
 	///
-	/// `on_response` is called (on a spawned task) once Bunq returns a
-	/// successful response. 429 responses are retried automatically.
+	/// `on_response` is called (on a spawned task) with `Ok(response)` on
+	/// success or `Err(`[`RateLimitExhausted`]`)` if all retries are used up.
 	pub async fn get_monetary_accounts_ratelimited<F, Fut>(
 		self: &Arc<Self>,
 		on_response: F,
 	) -> Duration
 	where
-		F: Fn(ApiResponse<Multiple<MonetaryAccountBankWrapper>>) -> Fut + Send + Sync + 'static,
+		F: Fn(Result<ApiResponse<Multiple<MonetaryAccountBankWrapper>>, RateLimitExhausted>) -> Fut + Send + Sync + 'static,
 		Fut: Future<Output = ()> + Send + 'static,
 	{
 		let c = Arc::clone(self);
@@ -183,15 +203,15 @@ impl ClientRateLimited {
 
 	/// Fetches a single monetary account by ID.
 	///
-	/// `on_response` is called (on a spawned task) once Bunq returns a
-	/// successful response. 429 responses are retried automatically.
+	/// `on_response` is called (on a spawned task) with `Ok(response)` on
+	/// success or `Err(`[`RateLimitExhausted`]`)` if all retries are used up.
 	pub async fn get_monetary_account_ratelimited<F, Fut>(
 		self: &Arc<Self>,
 		bank_account_id: u32,
 		on_response: F,
 	) -> Duration
 	where
-		F: Fn(ApiResponse<Single<MonetaryAccountBankWrapper>>) -> Fut + Send + Sync + 'static,
+		F: Fn(Result<ApiResponse<Single<MonetaryAccountBankWrapper>>, RateLimitExhausted>) -> Fut + Send + Sync + 'static,
 		Fut: Future<Output = ()> + Send + 'static,
 	{
 		let c = Arc::clone(self);
@@ -210,8 +230,8 @@ impl ClientRateLimited {
 
 	/// Fetches a single bunq.me payment request (BunqMeTab) by ID.
 	///
-	/// `on_response` is called (on a spawned task) once Bunq returns a
-	/// successful response. 429 responses are retried automatically.
+	/// `on_response` is called (on a spawned task) with `Ok(response)` on
+	/// success or `Err(`[`RateLimitExhausted`]`)` if all retries are used up.
 	pub async fn get_payment_request_ratelimited<F, Fut>(
 		self: &Arc<Self>,
 		monetary_account_id: u32,
@@ -219,7 +239,7 @@ impl ClientRateLimited {
 		on_response: F,
 	) -> Duration
 	where
-		F: Fn(ApiResponse<Single<BunqMeTabWrapper>>) -> Fut + Send + Sync + 'static,
+		F: Fn(Result<ApiResponse<Single<BunqMeTabWrapper>>, RateLimitExhausted>) -> Fut + Send + Sync + 'static,
 		Fut: Future<Output = ()> + Send + 'static,
 	{
 		let c = Arc::clone(self);
@@ -244,9 +264,10 @@ impl ClientRateLimited {
 	///
 	/// `amount` is always interpreted as EUR.
 	///
-	/// `on_response` is called (on a spawned task) once Bunq returns a
-	/// successful response. 429 responses are retried automatically, which
-	/// means `fetch` — and therefore the POST — may be called more than once.
+	/// `on_response` is called (on a spawned task) with `Ok(response)` on
+	/// success or `Err(`[`RateLimitExhausted`]`)` if all retries are used up.
+	/// 429 responses are retried automatically, which means `fetch` — and
+	/// therefore the POST — may be called more than once.
 	pub async fn create_payment_request_ratelimited<F, Fut>(
 		self: &Arc<Self>,
 		monetary_account_id: u32,
@@ -256,7 +277,7 @@ impl ClientRateLimited {
 		on_response: F,
 	) -> Duration
 	where
-		F: Fn(ApiResponse<Single<CreateBunqMeTabResponseWrapper>>) -> Fut + Send + Sync + 'static,
+		F: Fn(Result<ApiResponse<Single<CreateBunqMeTabResponseWrapper>>, RateLimitExhausted>) -> Fut + Send + Sync + 'static,
 		Fut: Future<Output = ()> + Send + 'static,
 	{
 		let c = Arc::clone(self);
@@ -281,8 +302,8 @@ impl ClientRateLimited {
 
 	/// Cancels an open bunq.me payment request.
 	///
-	/// `on_response` is called (on a spawned task) once Bunq returns a
-	/// successful response. 429 responses are retried automatically.
+	/// `on_response` is called (on a spawned task) with `Ok(response)` on
+	/// success or `Err(`[`RateLimitExhausted`]`)` if all retries are used up.
 	pub async fn close_payment_request_ratelimited<F, Fut>(
 		self: &Arc<Self>,
 		monetary_account_id: u32,
@@ -290,7 +311,7 @@ impl ClientRateLimited {
 		on_response: F,
 	) -> Duration
 	where
-		F: Fn(ApiResponse<Single<CreateBunqMeTabResponseWrapper>>) -> Fut + Send + Sync + 'static,
+		F: Fn(Result<ApiResponse<Single<CreateBunqMeTabResponseWrapper>>, RateLimitExhausted>) -> Fut + Send + Sync + 'static,
 		Fut: Future<Output = ()> + Send + 'static,
 	{
 		let c = Arc::clone(self);
