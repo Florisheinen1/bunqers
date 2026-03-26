@@ -362,8 +362,6 @@ pub enum BunqMeTabStatus {
 	Cancelled,
 	#[serde(rename = "EXPIRED")]
 	Expired,
-	#[serde(rename = "PAID")]
-	Paid,
 }
 
 /// Request body wrapper for `POST /bunqme-tab`.
