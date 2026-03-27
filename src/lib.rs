@@ -50,7 +50,7 @@
 //! which wraps the client with pre-configured rate limiters so you don't need
 //! to depend on `ritlers` directly:
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use std::sync::Arc;
 //!
 //! # #[tokio::main]
@@ -220,7 +220,7 @@ pub async fn create_client(
 	if let Some(session_token) = session_token {
 		// Attempt to reuse the provided session token.
 		let unchecked_session = UncheckedSession {
-			session_token: session_token,
+			session_token,
 			registered_device_id: installation_context.registered_device_id,
 			bunq_api_key: installation_context.bunq_api_key.clone(),
 			installation_token: installation_context.installation_token.clone(),

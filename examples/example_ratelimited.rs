@@ -35,7 +35,10 @@ async fn main() {
 	// On a 429, the task is automatically re-queued as a priority task by ritlers.
 	client_rl
 		.get_user_ratelimited(|response| async move {
-			let user = response.into_result().expect("API returned an error");
+			let user = response
+				.unwrap()
+				.into_result()
+				.expect("API returned an error");
 			println!("Hello, {}!", user.user_person.display_name);
 		})
 		.await;
@@ -43,7 +46,10 @@ async fn main() {
 	// Fetch monetary accounts — callbacks follow the same pattern.
 	client_rl
 		.get_monetary_accounts_ratelimited(|response| async move {
-			let accounts = response.into_result().expect("API returned an error");
+			let accounts = response
+				.unwrap()
+				.into_result()
+				.expect("API returned an error");
 			for account in &accounts.data {
 				println!(
 					"Account {}: {} {}",

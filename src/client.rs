@@ -176,8 +176,8 @@ impl Client {
 			},
 		};
 
-		let body = serde_json::to_string(&body)
-			.expect("Failed to serialize create_payment_request body");
+		let body =
+			serde_json::to_string(&body).expect("Failed to serialize create_payment_request body");
 
 		self.messenger
 			.send(Method::POST, &endpoint, Some(body))
@@ -200,8 +200,8 @@ impl Client {
 		let body = AlterBunqMeTabRequest {
 			status: Some(BunqMeTabStatus::Cancelled),
 		};
-		let body = serde_json::to_string(&body)
-			.expect("Failed to serialize close_payment_request body");
+		let body =
+			serde_json::to_string(&body).expect("Failed to serialize close_payment_request body");
 		self.messenger
 			.send(Method::PUT, &endpoint, Some(body))
 			.await
