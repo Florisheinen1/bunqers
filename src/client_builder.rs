@@ -448,33 +448,34 @@ impl ClientBuilder<UncheckedSession> {
 	pub async fn check_session(
 		self,
 	) -> Result<ClientBuilder<SessionContext>, BuildError<UncheckedSession>> {
-		let response: ApiResponse<Single<User>> = self
-			.messenger
-			.send(Method::GET, "user", None)
-			.await
-			.expect("Failed to send request to Bunq");
+		let response: Result<ApiResponse<Single<User>>, _> =
+			self.messenger.send(Method::GET, "user", None).await;
 
-		match response.into_result() {
-			Ok(user) => Ok(ClientBuilder {
-				api_base_url: self.api_base_url,
-				app_name: self.app_name,
-				private_key: self.private_key,
-				messenger: self.messenger,
-				context: SessionContext {
-					owner_id: user.user_person.id,
-					session_token: self.context.session_token,
-					registered_device_id: self.context.registered_device_id,
-					bunq_api_key: self.context.bunq_api_key,
-					installation_token: self.context.installation_token,
-					bunq_public_key: self.context.bunq_public_key,
-				},
+		match response {
+			Ok(response) => match response.into_result() {
+				Ok(user) => Ok(ClientBuilder {
+					api_base_url: self.api_base_url,
+					app_name: self.app_name,
+					private_key: self.private_key,
+					messenger: self.messenger,
+					context: SessionContext {
+						owner_id: user.user_person.id,
+						session_token: self.context.session_token,
+						registered_device_id: self.context.registered_device_id,
+						bunq_api_key: self.context.bunq_api_key,
+						installation_token: self.context.installation_token,
+						bunq_public_key: self.context.bunq_public_key,
+					},
+				}),
+				Err(error) => Err(BuildError {
+					reason: BuildErrorReason::BunqResponseApiError(error),
+					context: self.context,
+				}),
+			},
+			Err(_) => Err(BuildError {
+				reason: BuildErrorReason::BunqRequestError,
+				context: self.context,
 			}),
-			Err(error) => {
-				// Session is likely expired.
-				// TODO: Check for the specific expiration error code.
-				dbg!(error);
-				todo!()
-			}
 		}
 	}
 }
