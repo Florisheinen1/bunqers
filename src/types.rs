@@ -425,13 +425,14 @@ pub struct Payment {
 	pub created: NaiveDateTime,
 	#[serde(deserialize_with = "deserialize_date")]
 	pub updated: NaiveDateTime,
-	pub counterparty_alias: Alias,
+	pub counterparty_alias: Option<Alias>,
 }
 
 /// An alias (IBAN + display name) identifying a payment counterparty.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Alias {
-	pub iban: String,
-	pub display_name: String,
-	pub country: String,
+	pub iban: Option<String>,
+	pub display_name: Option<String>,
+	pub country: Option<String>,
+	pub swift_bic: Option<String>,
 }
